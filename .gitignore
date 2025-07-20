@@ -1,0 +1,24 @@
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual env
+venv/
+.env/
+
+# Logs and checkpoints
+*.log
+*.pth
+*.pt
+
+# data folder
+data/
+
+# Jupyter notebooks
+.ipynb_checkpoints/
+
+# VSCode or PyCharm settings
+.vscode/
+.idea/

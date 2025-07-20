@@ -1,0 +1,164 @@
+import os
+import random
+import numpy as np
+import torch
+
+from PIL import Image
+from torch.utils.data import Dataset
+from torchvision import transforms
+from torchvision.transforms.v2 import FiveCrop, RandomCrop
+from tqdm import tqdm
+from utils import clear_folder
+
+class CroppedImageDataset(Dataset):
+    """
+    A Pytorch dataset to scan pre-extracted cropped images,
+    and return the original crop with a randomly masked version and the mask
+
+    Args:
+        crops_dir (str): Directory path containing the pre-extracted crops.
+        transform (callable, optional): A function/transform that takes in
+        a PIL image and returns a transformed version.
+    """
+    def __init__(self, crops_dir, transform=None):
+        self.crops_dir = crops_dir
+        self.transform = transform or transforms.ToTensor()
+        self.crop_paths = self._scan_crops(crops_dir)
+
+    def __len__(self):
+        return len(self.crop_paths)
+
+    def __getitem__(self, index):
+        crop_path = self.crop_paths[index]
+
+        try:
+            image = Image.open(crop_path).convert('RGB')
+            crop = self.transform(image)
+
+            # Create a binary mask with a random block
+            _, height, width = crop.shape
+            mask = torch.ones_like(crop)
+            block_size = random.randint(min(height, width) // 4, min(height, width) // 2)
+            top = random.randint(0, height - block_size)
+            left = random.randint(0, width - block_size)
+            mask[:, top:top + block_size, left:left + block_size] = 0
+            masked_crop = crop * mask
+
+            return masked_crop, crop, mask
+
+        except Exception as e:
+            print(f"Error loading ({crop_path}): {e}.")
+            # Try next image to avoid a crash
+            return self.__getitem__((index + 1) % len(self.crop_paths))
+
+    @staticmethod
+    def _scan_crops(root_dir):
+        """
+        Scans directory for cropped images.
+        """
+        #image_ext = {'.jpg', '.jpeg', '.png'}
+        all_crops = []
+        print(f"Scanning for crops in: {root_dir} ...")
+
+        for root, _, files in os.walk(root_dir):
+            for filename in tqdm(files, desc=f"Scanning {os.path.basename(root)}", leave=False):
+                ext = os.path.splitext(filename)[1].lower()
+                #if ext in image_ext and '_crop' in filename:
+                if '_crop' in filename:
+                    all_crops.append(os.path.join(root, filename))
+
+        print(f"Found {len(all_crops)} crop images.")
+        return all_crops
+
+def preextract_fivecrops(source_dir, target_dir, crop_size=128):
+    """
+    Extract five fixed size crops (center + 4 corners) from each image,
+    then save them all as separate images.
+
+    Args:
+        source_dir (str): Directory path containing the images to crop.
+        target_dir (str): Directory path where the extracted crops will be saved.
+        crop_size (int): Size of the crop to extract.
+    """
+    cropper = FiveCrop(crop_size)
+    image_ext = {'.jpg', '.jpeg', '.png'}
+
+    #os.makedirs(target_dir, exist_ok=True)
+    clear_folder(target_dir)
+    print(f"Extracting five crops from images in ({source_dir}) to ({target_dir}).")
+
+    for root, _, files in os.walk(source_dir):
+        # Skip folders starting with "_"
+        if any(folder.startswith('_') for folder in os.path.relpath(root, source_dir).split(os.sep)):
+            continue
+
+        for filename in tqdm(files, desc=f"Scanning {os.path.basename(root)}", leave=False):
+            ext = os.path.splitext(filename)[1].lower()
+            if ext not in image_ext:
+                continue
+
+            image_path = os.path.join(root, filename)
+            try:
+                image = Image.open(image_path).convert('RGB')
+                crops = cropper(image)
+
+                base_name = os.path.splitext(filename)[0]
+                for i, crop in enumerate(crops):
+                    save_name = f"{base_name}_crop{i}.png"
+                    save_path = os.path.join(target_dir, save_name)
+                    crop.save(save_path)
+
+            except Exception as e:
+                print(f"Failed processing ({image_path}): {e}.")
+
+    print(f"Finished extracting all crops.")
+
+def preextract_randomcrops(source_dir, target_dir, crop_size=128, crops_per_image=3):
+    """
+    Extract a specified number of fixed size crops (all located randomly) from each image,
+    then save them all as separate images.
+
+    Args:
+        source_dir (str): Directory path containing the images to crop.
+        target_dir (str): Directory path where the extracted crops will be saved.
+        crop_size (int): Size of the crop to extract.
+        crops_per_image (int): Number of crops to extract.
+    """
+    cropper = RandomCrop(crop_size)
+    image_ext = {'.jpg', '.jpeg', '.png'}
+
+    os.makedirs(target_dir, exist_ok=True)
+    #TODO: clear_folder(target_dir)
+    print(f"Extracting ({crops_per_image}) random crops from images in ({source_dir}) to ({target_dir}).")
+
+    for root, _, files in os.walk(source_dir):
+        # Skip folders starting with "_"
+        if any(folder.startswith('_') for folder in os.path.relpath(root, source_dir).split(os.sep)):
+            continue
+
+        for filename in tqdm(files, desc=f"Scanning {os.path.basename(root)}", leave=False):
+            ext = os.path.splitext(filename)[1].lower()
+            if ext not in image_ext:
+                continue
+
+            image_path = os.path.join(root, filename)
+            try:
+                image = Image.open(image_path).convert('RGB')
+                width, height = image.size
+
+                # Skip small images
+                if width < crop_size or height < crop_size:
+                    print(f"Skipping small image ({width}x{height}): ({image_path}).")
+                    continue
+
+                base_name = os.path.splitext(filename)[0]
+                for i in range(crops_per_image):
+                    crop = cropper(image)
+                    save_name = f"{base_name}_crop{i}.png"
+                    save_path = os.path.join(target_dir, save_name)
+                    crop.save(save_path)
+
+            except Exception as e:
+                print(f"Failed processing ({image_path}): {e}.")
+
+    print(f"Finished extracting all crops.")
