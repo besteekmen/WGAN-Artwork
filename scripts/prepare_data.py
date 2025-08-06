@@ -1,11 +1,20 @@
 import os
 import shutil
 import matplotlib.pyplot as plt
+import random
+import numpy as np
+import torch
 
 from PIL import Image
-from config import SOURCE_PATH, CROP_PATH, CROP_SIZE, CROP_COUNT, SAMPLE_PATH
+from torchvision import transforms
+from config import SOURCE_PATH, CROP_PATH, CROP_SIZE, CROP_COUNT, SAMPLE_PATH, SEED
 from utils import clear_folder
 from data_utils import preextract_fivecrops, preextract_randomcrops, CroppedImageDataset
+
+# Set random seed for reproducibility
+random.seed(SEED)
+np.random.seed(SEED)
+torch.manual_seed(SEED)
 
 def display_samples(crops_dataset, num_samples=5, save=False, save_dir=None):
     """Display some sample crops and their masks."""
@@ -49,7 +58,11 @@ if __name__ == "__main__":
     #preextract_randomcrops(source_dir, target_dir, CROP_SIZE, CROP_COUNT)
 
     # Load dataset and show some samples
-    dataset = CroppedImageDataset(crops_dir=target_dir)
+    transform = transforms.Compose([
+        transforms.ToTensor(),
+        transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
+    ])
+    dataset = CroppedImageDataset(crops_dir=target_dir, transform=transform)
     display_samples(dataset, num_samples=10, save=True, save_dir=save_dir)
 
 

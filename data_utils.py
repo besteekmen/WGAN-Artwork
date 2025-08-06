@@ -22,7 +22,11 @@ class CroppedImageDataset(Dataset):
     """
     def __init__(self, crops_dir, transform=None):
         self.crops_dir = crops_dir
-        self.transform = transform or transforms.ToTensor()
+        self.transform = transform or transforms.Compose([
+            transforms.ToTensor(),
+            # GANs perform better when inputs are in [-1,1] range instead of [0,1]
+            transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
+        ])
         self.crop_paths = self._scan_crops(crops_dir)
 
     def __len__(self):
@@ -49,13 +53,17 @@ class CroppedImageDataset(Dataset):
         except Exception as e:
             print(f"Error loading ({crop_path}): {e}.")
             # Try next image to avoid a crash
-            return self.__getitem__((index + 1) % len(self.crop_paths))
+            next_index = (index + 1) % len(self.crop_paths)
+            if next_index == index:
+                raise RuntimeError(f"All image loading failed at index {index}.")
+            return self.__getitem__(next_index)
 
     @staticmethod
     def _scan_crops(root_dir):
         """
         Scans directory for cropped images.
         """
+        # TODO: add image extension check later!
         #image_ext = {'.jpg', '.jpeg', '.png'}
         all_crops = []
         print(f"Scanning for crops in: {root_dir} ...")

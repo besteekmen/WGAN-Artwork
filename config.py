@@ -1,5 +1,8 @@
 import os
 
+# --- Reproducibility ---
+SEED = 42
+
 # --- Training settings ---
 BATCH_SIZE = 128
 # BATCH_SIZE has a major impact on how much GPU memory the code will consume!
@@ -16,13 +19,17 @@ EPOCH_NUM = 25
 lr = 2e-4 # learning rate
 
 # --- Model hyperparameters ---
-D_HIDDEN = 64
-G_HIDDEN = 64
+D_HIDDEN = 64 # base discriminator channels
+# D_HIDDEN_LOCAL = 32 (optional, if not the same, for less params)
+G_HIDDEN = 64 # base generator channels (stage)
 Z_DIM = 100
 
 # --- Image channels and dimensions ---
-IMAGE_CHANNEL = 1 # Num of color channels
+IMAGE_CHANNELS = 3 # Num of color channels
 X_DIM = 64
+
+# --- Image channels and dimensions ---
+LOCAL_PATCH_SIZE = 128 # Patch size for local discriminator
 
 # --- Datasets and paths ---
 SOURCE_PATH = 'data/wikiart' # Root of dataset
