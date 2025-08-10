@@ -3,11 +3,12 @@ import torch.nn as nn
 import torch.nn.functional as F
 from config import *
 
-# To toggle between gated and standard convolutions in the fine stage
-IS_GATED = True
-
-# Define gated convolution (to use if IS_GATED)
 class GatedConv2d(nn.Module):
+    """Gated convolution layer for inpainting.
+    Applies both a feature extraction conv and a gating mask conv.
+    The gating mask controls which parts of the features are passed on,
+    helping the network handle missing regions explicitly (better for arbitrary shaped masks).
+    """
     def __init__(self, in_channels, out_channels, kernel_size=3, stride=1, padding=1, dilation=1):
         super(GatedConv2d, self).__init__()
         self.feature_conv = nn.Conv2d(
@@ -23,17 +24,24 @@ class GatedConv2d(nn.Module):
         gate = self.sigmoid(self.gating_conv(x))
         return feature * gate
 
-# Convolution helper function based on IS_GATED flag
 def conv_block(in_channels, out_channels, kernel_size=3, stride=1, padding=1, dilation=1):
+    """Helper function based on IS_GATED flag to create either a gated or a standard convolution layer."""
+    layers = []
     if IS_GATED:
-        return GatedConv2d(in_channels, out_channels, kernel_size, stride, padding, dilation)
+        layers.append(GatedConv2d(in_channels, out_channels, kernel_size, stride, padding, dilation))
+        # No normalization here, since it is gated
     else:
-        return nn.Conv2d(in_channels, out_channels, kernel_size, stride, padding, dilation)
+        layers.append(nn.Conv2d(in_channels, out_channels, kernel_size, stride, padding, dilation))
+        layers.append(nn.InstanceNorm2d(out_channels, affine=True)) # --> replaced BatchNorm2d
+        # Normalization added since no gates!
+    return nn.Sequential(*layers)
 
 # ---------------------
 # Coarse Generator
 # ---------------------
 class CoarseGenerator(nn.Module):
+    """Stage 1: Coarse inpainting generator (global structure).
+    Generates a coarse prediction of missing layers."""
     def __init__(self, in_channels=4):
         super(CoarseGenerator, self).__init__()
         self.encoder = nn.Sequential(
@@ -44,11 +52,11 @@ class CoarseGenerator(nn.Module):
             # Source: https://discuss.pytorch.org/t/guidelines-for-when-and-why-one-should-set-inplace-true/50923
             # 2nd layer
             nn.Conv2d(G_HIDDEN, G_HIDDEN * 2, 3, stride=2, padding=1), # 32x32
-            nn.BatchNorm2d(G_HIDDEN * 2),
+            nn.InstanceNorm2d(G_HIDDEN * 2, affine=True), # --> replaced BatchNorm2d
             nn.ReLU(inplace=True),
             # 3rd layer
             nn.Conv2d(G_HIDDEN * 2, G_HIDDEN * 4, 3, stride=2, padding=1), # 16x16
-            nn.BatchNorm2d(G_HIDDEN * 4),
+            nn.InstanceNorm2d(G_HIDDEN * 4, affine=True), # --> replaced BatchNorm2d
             nn.ReLU(inplace=True)
         )
         self.middle = nn.Sequential(
@@ -66,11 +74,11 @@ class CoarseGenerator(nn.Module):
         self.decoder = nn.Sequential(
             # 7th layer
             nn.ConvTranspose2d(G_HIDDEN * 4, G_HIDDEN * 2, 4, stride=2, padding=1),
-            nn.BatchNorm2d(G_HIDDEN * 2),
+            nn.InstanceNorm2d(G_HIDDEN * 2, affine=True), # --> replaced BatchNorm2d
             nn.ReLU(inplace=True),
             # 8th layer
             nn.ConvTranspose2d(G_HIDDEN * 2, G_HIDDEN, 4, stride=2, padding=1),
-            nn.BatchNorm2d(G_HIDDEN),
+            nn.InstanceNorm2d(G_HIDDEN, affine=True), # --> replaced BatchNorm2d
             nn.ReLU(inplace=True),
             # 9th layer
             nn.Conv2d(G_HIDDEN,3, 3, padding=1),
@@ -86,6 +94,14 @@ class CoarseGenerator(nn.Module):
 # Fine Generator
 # ---------------------
 class FineGenerator(nn.Module):
+    """Stage 2: Fine inpainting generator (detail refinement).
+    Refines the coarse output with gated convolutions.
+    - Gating controls feature propagation
+    - BatchNorm would mix statistics between masked/unmasked regions
+    - Keeps mask-aware nature of layers
+    Skips normalization in encoder&middle (Yu et al., 2019) to
+    do not weaken the gating affect of gated con. But apply in decoder
+    since representation is more filled and normalization helps stability."""
     def __init__(self, in_channels=4):
         super(FineGenerator, self).__init__()
         self.encoder = nn.Sequential(
@@ -114,11 +130,11 @@ class FineGenerator(nn.Module):
         self.decoder = nn.Sequential(
             # 7th layer
             nn.ConvTranspose2d(G_HIDDEN * 4, G_HIDDEN * 2, 4, stride=2, padding=1),
-            nn.BatchNorm2d(G_HIDDEN * 2),
+            nn.InstanceNorm2d(G_HIDDEN * 2, affine=True),  # --> replaced BatchNorm2d
             nn.ReLU(inplace=True),
             # 8th layer
             nn.ConvTranspose2d(G_HIDDEN * 2, G_HIDDEN, 4, stride=2, padding=1),
-            nn.BatchNorm2d(G_HIDDEN),
+            nn.InstanceNorm2d(G_HIDDEN, affine=True),  # --> replaced BatchNorm2d
             nn.ReLU(inplace=True),
             # 9th layer
             nn.Conv2d(G_HIDDEN,3, 3, padding=1),
@@ -130,8 +146,11 @@ class FineGenerator(nn.Module):
         x = self.decoder(x)
         return x
 
-# Full generator with coarse and fine stages
+# ---------------------
+# Generator Wrapper
+# ---------------------
 class Generator(nn.Module):
+    """Generator wrapper: Coarse (global) + Fine (detail)"""
     def __init__(self, in_channels=IMAGE_CHANNELS, mask_channels=1):
         super(Generator, self).__init__()
         self.in_channels = in_channels

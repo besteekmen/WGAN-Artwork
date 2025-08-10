@@ -1,6 +1,6 @@
 import os
 
-# --- Reproducibility ---
+# --- Reproducibility (set None for random seed) ---
 SEED = 42
 
 # --- Training settings ---
@@ -19,6 +19,7 @@ EPOCH_NUM = 25
 lr = 2e-4 # learning rate
 
 # --- Model hyperparameters ---
+IS_GATED = True # toggle between gated and standard convolutions in the fine stage
 D_HIDDEN = 64 # base discriminator channels
 # D_HIDDEN_LOCAL = 32 (optional, if not the same, for less params)
 G_HIDDEN = 64 # base generator channels (stage)
@@ -45,9 +46,6 @@ REAL_LABEL = 1
 
 # --- CUDA usage ---
 CUDA = True # set 'False' to train on CPU
-
-# --- Seed (set None for random seed) ---
-seed = 1
 
 
 
