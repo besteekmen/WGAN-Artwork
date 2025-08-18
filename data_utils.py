@@ -48,6 +48,7 @@ class CroppedImageDataset(Dataset):
             mask[:, top:top + block_size, left:left + block_size] = 0
             masked_crop = crop * mask
 
+            # mask here is human-friendly version, need to be converted for generator
             return masked_crop, crop, mask
 
         except Exception as e:

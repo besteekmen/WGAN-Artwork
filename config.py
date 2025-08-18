@@ -32,12 +32,17 @@ X_DIM = 64
 # --- Image channels and dimensions ---
 LOCAL_PATCH_SIZE = 128 # Patch size for local discriminator
 
+# --- Style loss weights ---
+L1_LAMBDA = 10.0 # TODO: do I need to change?
+STYLE_LAMBDA = 250.0 # TODO: do I need to change?
+
 # --- Datasets and paths ---
 SOURCE_PATH = 'data/wikiart' # Root of dataset
 CROP_PATH = 'data/crops'
 SAMPLE_PATH = 'img'
 CROP_SIZE = 256
-CROP_COUNT = 1
+CROP_COUNT = 1 # TODO: Random crop is used to crop only 1 patch!
+NUM_WORKERS = 4 # TODO: do I need to change?
 # LOG_FILE = os.path.join(OUT_PATH, 'log.txt')
 
 # --- Labels for fake and real images ---
