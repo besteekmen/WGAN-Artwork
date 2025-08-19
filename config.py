@@ -42,7 +42,7 @@ CROP_PATH = 'data/crops'
 SAMPLE_PATH = 'img'
 CROP_SIZE = 256
 CROP_COUNT = 1 # TODO: Random crop is used to crop only 1 patch!
-NUM_WORKERS = 4 # TODO: do I need to change?
+NUM_WORKERS = 2 # TODO: try 4
 # LOG_FILE = os.path.join(OUT_PATH, 'log.txt')
 
 # --- Labels for fake and real images ---

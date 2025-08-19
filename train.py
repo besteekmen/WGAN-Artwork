@@ -181,6 +181,7 @@ def main():
     # Define loss function and optimizer
     criterion = {
         "bce": nn.BCELoss(), # Binary Cross-Entropy loss function
+        # TODO: Should I use BCEWithLogitsLoss and remove sigmoid layer?
         "l1": nn.L1Loss(), # L1 loss function
         "mse": nn.MSELoss() # MSE loss function
     }
@@ -212,7 +213,7 @@ def main():
             dataset,
             batch_size=BATCH_SIZE,
             shuffle=True,
-            num_workers=2, # TODO: Use NUM_WORKERS here after trying!,
+            num_workers=NUM_WORKERS,
             pin_memory=cuda_available
         )
         _ = next(iter(dataloader))  # force load to test
@@ -243,14 +244,11 @@ def main():
 
     # Trackers for loss values
     losses_log = {
-        "G": [],
-        "totD": [],
-        "globD": [],
-        "locD": []
+        "totalG": [],
+        "totalD": [],
+        "globalD": [],
+        "localD": []
     }
-
-    # TODO: check if necessary to add Fixed noise vector for visualization
-    #viz_noise = torch.randn(BATCH_SIZE, Z_DIM, 1, 1, device=device)
 
     # Training loop
     print("Starting training...")
@@ -321,11 +319,11 @@ def main():
             composite = fake * mask_hole + original * (1.0 - mask_hole)
 
             # Calculate losses
-            losses["adv_global"] = criterion["bce"](globalD(composite), real_labels)
+            losses["adv_globalD"] = criterion["bce"](globalD(composite), real_labels)
             patches = crop_local_patch(composite, mask_hole)
             losses["adv_localD"] = criterion["bce"](localD(patches), real_labels)
             losses["adv"] = losses["adv_globalD"] + losses["adv_localD"]
-            losses["l1"] = criterion["l1"](fake * mask_hole, original * mask_hole) * L1_LAMBDA
+            losses["l1"] = criterion["l1"](fake * mask_hole, original * mask_hole)
 
             # Style loss calculation
             real_features = style_extractor(original)
@@ -333,32 +331,34 @@ def main():
             losses["style"] = style_loss(real_features, fake_features, criterion)
 
             # Loss backwards and optimizer step
-            losses["totalG"] = losses["adv"] + losses["l1"] + losses["style"]
+            losses["totalG"] = losses["adv"] + L1_LAMBDA * losses["l1"] + STYLE_LAMBDA * losses["style"]
             losses["totalG"].backward()
             optimizer_netG.step()
 
             # Log losses
-            losses_log["G"].append(losses["totalG"].item())
-            losses_log["totD"].append(losses["totalD"].item())
-            losses_log["globD"].append(losses["globalD"].item())
-            losses_log["locD"].append(losses["localD"].item())
+            losses_log["totalG"].append(losses["totalG"].item())
+            losses_log["totalD"].append(losses["totalD"].item())
+            losses_log["globalD"].append(losses["globalD"].item())
+            losses_log["localD"].append(losses["localD"].item())
 
             # Print the progress
             if i % 100 == 0:
                 dataloader_tqdm.set_postfix({
                     'G': losses["totalG"].item(),
-                    'totD': losses["totalD"].item(),
-                    'globD': losses["globD"].item(),
-                    'locD': losses["localD"].item()
+                    'D': losses["totalD"].item(),
+                    'gD': losses["globalD"].item(),
+                    'lD': losses["localD"].item()
                 })
 
-                # TODO: Add loss values to graph
-
-                #vutils.save_image(x_real, os.path.join(OUT_PATH, 'real_samples.png'), normalize=True)
-                #with torch.no_grad():
-                #    viz_sample = net_g(viz_noise)
-                #    vutils.save_image(viz_sample, os.path.join(OUT_PATH, f'fake_samples_epoch{epoch}_batch{i}.png'),
-                #                      normalize=True)
+                # save a batch of image comparisons
+                with torch.no_grad():
+                    vis_fake = netG(original, mask_hole)
+                    vis_comp = vis_fake * mask_hole + original * (1.0 - mask_hole)
+                    grid = torch.cat([original, masked, vis_comp], 0)
+                    vutils.save_image(grid,
+                                      os.path.join(OUT_PATH, f'comparison_epoch({epoch})_batch({i}).png'),
+                                      normalize=True,
+                                      nrow=BATCH_SIZE)
             global_step += 1
 
         # Save Generator and Discriminator
@@ -367,15 +367,27 @@ def main():
             torch.save(globalD.state_dict(), os.path.join(OUT_PATH, f'globalD_epoch{epoch+1}.pth'))
             torch.save(localD.state_dict(), os.path.join(OUT_PATH, f'localD_epoch{epoch+1}.pth'))
 
+        # Save fixed samples to track progress on same inputs
+        with torch.no_grad():
+            fixed_fake = netG(fixed_original, fixed_mask_hole)
+            fixed_comp = fixed_fake * fixed_mask_hole + fixed_original * (1.0 - fixed_mask_hole)
+            grid = torch.cat([fixed_original, fixed_masked, fixed_comp], 0)
+            vutils.save_image(
+                grid,
+                os.path.join(OUT_PATH, f'fixed_epoch{epoch+1}.png'),
+                normalize=True,
+                nrow=BATCH_SIZE
+            )
+
     print('Training complete!')
 
     # Plot loss curve
     plt.figure(figsize=(10, 5))
     plt.title("Generator and Discriminator Loss During Training")
-    plt.plot(losses_log["G"], label="G")
-    plt.plot(losses_log["totD"], label="totD")
-    plt.plot(losses_log["globD"], label="globD")
-    plt.plot(losses_log["locD"], label="locD")
+    plt.plot(losses_log["totalG"], label="G")
+    plt.plot(losses_log["totalD"], label="D")
+    plt.plot(losses_log["globalD"], label="gD")
+    plt.plot(losses_log["localD"], label="lD")
     plt.xlabel("Iterations")
     plt.ylabel("Loss")
     plt.legend()

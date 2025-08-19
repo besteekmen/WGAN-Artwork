@@ -161,6 +161,8 @@ class Generator(nn.Module):
 
     def forward(self, image, mask):
         # Mask: keep background, replace masked area with mask channel
+        # Masked input is created internally,
+        # feed to generator only the original and the mask
         masked_input = torch.cat([image * (1 - mask), mask], 1)
 
         # Stage 1: Coarse prediction
