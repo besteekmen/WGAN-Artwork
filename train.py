@@ -45,6 +45,7 @@ def gram_matrix(features: torch.Tensor) -> torch.Tensor:
     B, C, H, W = features.size()
     feats = features.view(B, C, H * W)
     return torch.bmm(feats, feats.transpose(1, 2)) / (C * H * W)
+    # TODO: should divide by H*W?
 
 class VGG19StyleExtractor(nn.Module):
     """Extract intermediate feature maps from VGG19 for style loss (frozen)."""
@@ -323,7 +324,14 @@ def main():
             patches = crop_local_patch(composite, mask_hole)
             losses["adv_localD"] = criterion["bce"](localD(patches), real_labels)
             losses["adv"] = losses["adv_globalD"] + losses["adv_localD"]
-            losses["l1"] = criterion["l1"](fake * mask_hole, original * mask_hole)
+            # Pixel-wise reconstruction loss
+            # Weighted l1 loss: https://arxiv.org/pdf/2401.03395
+            # Also weighted: https://arxiv.org/pdf/1801.07892
+            # Training only the masked area may cause seam artifacts at boundary and inconsistencies
+            losses["hole"] = criterion["l1"](fake * mask_hole, original * mask_hole)
+            losses["valid"] = criterion["l1"](fake * (1.0 - mask_hole), original * (1.0 - mask_hole))
+            losses["l1"] = HOLE_LAMBDA * losses["hole"] + VALID_LAMBDA * losses["valid"]
+            # TODO: What about perceptual loss?
 
             # Style loss calculation
             real_features = style_extractor(original)

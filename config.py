@@ -32,7 +32,9 @@ X_DIM = 64
 # --- Image channels and dimensions ---
 LOCAL_PATCH_SIZE = 128 # Patch size for local discriminator
 
-# --- Style loss weights ---
+# --- Loss weights ---
+HOLE_LAMBDA = 1.0 # full weight for missing region
+VALID_LAMBDA = 0.1 # smaller for known region
 L1_LAMBDA = 10.0 # TODO: do I need to change?
 STYLE_LAMBDA = 250.0 # TODO: do I need to change?
 
