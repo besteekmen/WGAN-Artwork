@@ -187,9 +187,14 @@ def main():
         "mse": nn.MSELoss() # MSE loss function
     }
 
-    optimizer_netG = optim.Adam(netG.parameters(), lr=lr, betas=(0.5, 0.999))
-    optimizer_globalD = optim.Adam(globalD.parameters(), lr=lr, betas=(0.5, 0.999))
-    optimizer_localD = optim.Adam(localD.parameters(), lr=lr, betas=(0.5, 0.999))
+    # Optimizers
+    # If discriminator gets perfect quickly, generator gradients may vanish!
+    # Hence make learning slower for D and faster for G (Contextual Attention GAN, Yu et al. 2018)
+    # TODO: If good texture but broken structure, prioritize global (Izuka et al. 2017)
+    # TODO: If discriminators are weak (not decreasing loss), use update ratios (WGAN-GP)
+    optimizer_netG = optim.Adam(netG.parameters(), lr=LR_G, betas=(0.5, 0.999))
+    optimizer_globalD = optim.Adam(globalD.parameters(), lr=LR_D, betas=(0.5, 0.999))
+    optimizer_localD = optim.Adam(localD.parameters(), lr=LR_D, betas=(0.5, 0.999))
 
     # VGG style extractor (frozen)
     style_extractor = VGG19StyleExtractor(device=device).to(device)

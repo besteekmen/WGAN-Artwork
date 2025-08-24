@@ -17,6 +17,8 @@ EPOCH_NUM = 25
 # 1. Set a larger epoch number
 # 2. Set a small learning rate
 lr = 2e-4 # learning rate
+LR_G = 2e-4 # generator learning rate
+LR_D = 1e-4 # discriminator learning rate
 
 # --- Model hyperparameters ---
 IS_GATED = True # toggle between gated and standard convolutions in the fine stage
