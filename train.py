@@ -85,6 +85,55 @@ def style_loss(real_features, fake_features, criterion):
         loss += criterion["mse"](gram_matrix(rf), gram_matrix(ff))
     return loss
 
+# Perceptual loss helps generator to match semantic structures instead of only textures or pixels.
+# Yu et al 2018 Contextual attention, Liu et al 2018 partial convolutions etc uses both style and perceptual
+class VGG16PerceptualLoss(nn.Module):
+    """Perceptual loss for VGG16.
+    Compare feature maps of real and generated images."""
+    def __init__(self, device, layers=None, resize=True):
+        super().__init__()
+        vgg = tvmodels.vgg16(pretrained=True).features.to(device).eval()
+        for param in vgg.parameters():
+            param.requires_grad = False
+        self.vgg = vgg
+        # Default layers for perceptual loss (relu1_2, relu2_2, relu3_3, relu4_3)
+        self.layers = layers or ['3', '8', '15', '22']
+        # store ImageNet mean/std statistics for normalization (could be done with register_buffer later)
+        self.mean = torch.Tensor([0.485, 0.456, 0.406], device=device).view(1, 3, 1, 1)
+        self.std = torch.Tensor([0.229, 0.224, 0.225], device=device).view(1, 3, 1, 1)
+        self.criterion = nn.MSELoss() # TODO: use criterion dict later?
+
+    def forward(self, real, fake):
+        """
+        real, fake: [B, 3, H, W] values in [-1, 1]
+        """
+        # Rescale from [-1, 1] to [0, 1] and normalize
+        real = (real + 1.0) / 2.0
+        fake = (fake + 1.0) / 2.0
+        # Normalize with ImageNet statistics
+        real = (real - self.mean) / self.std
+        fake = (fake - self.mean) / self.std
+
+        # Pass through VGG and extract features
+        real_features = []
+        fake_features = []
+        x_real = real
+        x_fake = fake
+        for name, layer in self.vgg.named_children():
+            x_real = layer(x_real)
+            x_fake = layer(x_fake)
+            if name in self.layers:
+                real_features.append(x_real)
+                fake_features.append(x_fake)
+                if len(real_features) == len(self.layers):
+                    break
+
+        # Compute MSE between features
+        loss = 0
+        for rf, ff in zip(real_features, fake_features):
+            loss += self.criterion(rf, ff)
+        return loss
+
 # ---------------------
 # Helper: Crop a local square patch centered on mask bounding box
 # ---------------------
@@ -198,6 +247,9 @@ def main():
 
     # VGG style extractor (frozen)
     style_extractor = VGG19StyleExtractor(device=device).to(device)
+
+    # VGG perceptual loss
+    perceptual_loss_func = VGG16PerceptualLoss(device=device).to(device)
 
     # Dataset and loader
     # CroppedImageDataset already applies transforms (ToTensor + Normalize to [-1, 1])
@@ -351,8 +403,14 @@ def main():
             fake_features = style_extractor(composite)
             losses["style"] = style_loss(real_features, fake_features, criterion)
 
+            # Perceptual loss calculation
+            losses["perceptual"] = perceptual_loss_func(original, composite)
+
             # Loss backwards and optimizer step
-            losses["totalG"] = losses["adv"] + L1_LAMBDA * losses["l1"] + STYLE_LAMBDA * losses["style"]
+            losses["totalG"] = (losses["adv"] +
+                                L1_LAMBDA * losses["l1"] +
+                                STYLE_LAMBDA * losses["style"] +
+                                PERCEPTUAL_LAMBDA * losses["perceptual"])
             losses["totalG"].backward()
             optimizer_netG.step()
 

@@ -34,11 +34,14 @@ X_DIM = 64
 # --- Image channels and dimensions ---
 LOCAL_PATCH_SIZE = 128 # Patch size for local discriminator
 
-# --- Loss weights ---
-HOLE_LAMBDA = 1.0 # full weight for missing region
-VALID_LAMBDA = 0.1 # smaller for known region
-L1_LAMBDA = 10.0 # TODO: do I need to change?
-STYLE_LAMBDA = 250.0 # TODO: do I need to change?
+# --- Loss weights (similar to Contextual Attention Yu et al 2018) ---
+# TODO: do I need to change?
+HOLE_LAMBDA = 6.0 # full weight for missing region (was 1.0)
+VALID_LAMBDA = 1.0 # smaller for known region (was 0.1)
+L1_LAMBDA = 1.0 # was 10.0
+STYLE_LAMBDA = 120.0 # was 250
+ADV_LAMBDA = 0.001 # small weight for adversarial loss (for stable training)
+PERCEPTUAL_LAMBDA = 0.05 # If textures too blurry, try 0.1
 
 # --- Datasets and paths ---
 SOURCE_PATH = 'data/wikiart' # Root of dataset
