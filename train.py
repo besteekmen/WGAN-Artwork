@@ -256,6 +256,14 @@ def main():
         "localD": []
     }
 
+    # Trackers for averaged loss values per epoch
+    epoch_log = {
+        "totalG": [],
+        "totalD": [],
+        "globalD": [],
+        "localD": []
+    }
+
     # Training loop
     print("Starting training...")
     global_step = 0
@@ -367,12 +375,23 @@ def main():
                 with torch.no_grad():
                     vis_fake = netG(original, mask_hole)
                     vis_comp = vis_fake * mask_hole + original * (1.0 - mask_hole)
-                    grid = torch.cat([original, masked, vis_comp], 0)
+                    grid = torch.cat([original, masked, vis_comp], 1) # horizontal stack per sample
                     vutils.save_image(grid,
                                       os.path.join(OUT_PATH, f'comparison_epoch({epoch})_batch({i}).png'),
                                       normalize=True,
-                                      nrow=BATCH_SIZE)
+                                      nrow=1) # 1 row per sample (not BATCH_SIZE)
             global_step += 1
+
+        # Compute and store average losses for the current epoch
+        avg_totalG = sum(losses_log["totalG"][-len(dataloader):]) / len(dataloader)
+        avg_totalD = sum(losses_log["totalD"][-len(dataloader):]) / len(dataloader)
+        avg_globalD = sum(losses_log["globalD"][-len(dataloader):]) / len(dataloader)
+        avg_localD = sum(losses_log["localD"][-len(dataloader):]) / len(dataloader)
+
+        epoch_log["totalG"].append(avg_totalG)
+        epoch_log["totalD"].append(avg_totalD)
+        epoch_log["globalD"].append(avg_globalD)
+        epoch_log["localD"].append(avg_localD)
 
         # Save Generator and Discriminator
         if (epoch + 1) % CHECKPOINT_EVERY == 0:
@@ -389,22 +408,35 @@ def main():
                 grid,
                 os.path.join(OUT_PATH, f'fixed_epoch{epoch+1}.png'),
                 normalize=True,
-                nrow=BATCH_SIZE
+                nrow=BATCH_SIZE # TODO: Or fixed_original.size(0)?
             )
 
     print('Training complete!')
 
-    # Plot loss curve
+    # Plot per-batch loss curve
     plt.figure(figsize=(10, 5))
-    plt.title("Generator and Discriminator Loss During Training")
-    plt.plot(losses_log["totalG"], label="G")
-    plt.plot(losses_log["totalD"], label="D")
-    plt.plot(losses_log["globalD"], label="gD")
-    plt.plot(losses_log["localD"], label="lD")
+    plt.title("Generator and Discriminator Loss During Training (per batch)")
+    plt.plot(losses_log["totalG"], label="G (batch)")
+    plt.plot(losses_log["totalD"], label="D (batch)")
+    plt.plot(losses_log["globalD"], label="gD (batch)")
+    plt.plot(losses_log["localD"], label="lD (batch)")
     plt.xlabel("Iterations")
     plt.ylabel("Loss")
     plt.legend()
-    plt.savefig(os.path.join(OUT_PATH, "loss_curve.png"))
+    plt.savefig(os.path.join(OUT_PATH, "loss_curve_batch.png"))
+    plt.close()
+
+    # Plot per-epoch averaged loss curve (Like DCGAN)
+    plt.figure(figsize=(10, 5))
+    plt.title("Generator and Discriminator Loss During Training (per epoch avg)")
+    plt.plot(epoch_log["totalG"], label="G (epoch avg)")
+    plt.plot(epoch_log["totalD"], label="D (epoch avg)")
+    plt.plot(epoch_log["globalD"], label="gD (epoch avg)")
+    plt.plot(epoch_log["localD"], label="lD (epoch avg)")
+    plt.xlabel("Epoch")
+    plt.ylabel("Loss")
+    plt.legend()
+    plt.savefig(os.path.join(OUT_PATH, "loss_curve_epoch.png"))
     plt.close()
 
 # Train Generator and Discriminator networks
