@@ -14,15 +14,20 @@ from config import LOCAL_PATCH_SIZE
 class CroppedImageDataset(Dataset):
     """
     A Pytorch dataset to scan pre-extracted cropped images,
-    and return the original crop with a randomly masked version and the mask
+    and return the original crop with a (randomly) masked version and the mask
 
     Args:
         crops_dir (str): Directory path containing the pre-extracted crops.
         transform (callable, optional): A function/transform that takes in
         a PIL image and returns a transformed version.
+        split (str): One of 'train', 'val', 'test'
+            - train/val: random masks each epoch
+            - test: deterministic mask per index (reproducible)
     """
-    def __init__(self, crops_dir, transform=None):
+    def __init__(self, crops_dir, transform=None, split='train'):
         self.crops_dir = crops_dir
+        self.split = split.lower()
+        assert self.split in ['train', 'val', 'test'], f"Split {split} not recognized.!"
         self.transform = transform or transforms.Compose([
             transforms.ToTensor(),
             # GANs perform better when inputs are in [-1,1] range instead of [0,1]
@@ -40,12 +45,22 @@ class CroppedImageDataset(Dataset):
             image = Image.open(crop_path).convert('RGB')
             crop = self.transform(image)
 
-            # Create a binary mask with a random block
+            # Create a binary mask
             _, height, width = crop.shape
+
+            if self.split == 'test':
+                # Deterministic mask generation using index
+                rndx = random.Random(index)
+                block_size = rndx.randint(min(height, width) // 4, min(height, width) // 2)
+                top = rndx.randint(0, height - block_size)
+                left = rndx.randint(0, width - block_size)
+            else:
+                # Random mask at each call
+                block_size = random.randint(min(height, width) // 4, min(height, width) // 2)
+                top = random.randint(0, height - block_size)
+                left = random.randint(0, width - block_size)
+
             mask = torch.ones_like(crop)
-            block_size = random.randint(min(height, width) // 4, min(height, width) // 2)
-            top = random.randint(0, height - block_size)
-            left = random.randint(0, width - block_size)
             mask[:, top:top + block_size, left:left + block_size] = 0
             masked_crop = crop * mask
 

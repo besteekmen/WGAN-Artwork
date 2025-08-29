@@ -46,6 +46,7 @@ GP_LAMBDA = 10.0 # WGAN-GP penalty weight
 
 # --- Datasets and paths ---
 SOURCE_PATH = 'data/wikiart' # Root of dataset
+DATA_PATH = 'data'
 CROP_PATH = 'data/crops'
 SAMPLE_PATH = 'img'
 CROP_SIZE = 256
