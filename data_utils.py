@@ -9,6 +9,7 @@ from torchvision import transforms
 from torchvision.transforms.v2 import FiveCrop, RandomCrop
 from tqdm import tqdm
 from utils import clear_folder
+from config import LOCAL_PATCH_SIZE
 
 class CroppedImageDataset(Dataset):
     """
@@ -49,6 +50,7 @@ class CroppedImageDataset(Dataset):
             masked_crop = crop * mask
 
             # mask here is human-friendly version, need to be converted for generator
+            # masked_crop: [-1,1], crop: [-1,1], mask: [0,1]
             return masked_crop, crop, mask
 
         except Exception as e:
@@ -79,7 +81,7 @@ class CroppedImageDataset(Dataset):
         print(f"Found {len(all_crops)} crop images.")
         return all_crops
 
-def preextract_fivecrops(source_dir, target_dir, crop_size=128):
+def preextract_fivecrops(source_dir, target_dir, crop_size=LOCAL_PATCH_SIZE):
     """
     Extract five fixed size crops (center + 4 corners) from each image,
     then save them all as separate images.
@@ -122,7 +124,7 @@ def preextract_fivecrops(source_dir, target_dir, crop_size=128):
 
     print(f"Finished extracting all crops.")
 
-def preextract_randomcrops(source_dir, target_dir, crop_size=128, crops_per_image=3):
+def preextract_randomcrops(source_dir, target_dir, crop_size=LOCAL_PATCH_SIZE, crops_per_image=3):
     """
     Extract a specified number of fixed size crops (all located randomly) from each image,
     then save them all as separate images.

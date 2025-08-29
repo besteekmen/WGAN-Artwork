@@ -2,13 +2,22 @@ import errno
 import os
 import shutil
 import sys
-
+import torch
 
 def to_np(var):
     """Export torch.Tensor to NumPy array.
     """
     return var.detach().cpu().numpy()
 
+def to_unit(tensor: torch.Tensor) -> torch.Tensor:
+    """Rescale tensor from [-1,1] to [0,1].
+    """
+    return (tensor + 1) / 2
+
+def to_signed(tensor: torch.Tensor) -> torch.Tensor:
+    """Rescale tensor from [0,1] to [-1,1].
+    """
+    return (tensor * 2) - 1
 
 def create_folder(folder_path):
     """Create a folder if it does not exist.

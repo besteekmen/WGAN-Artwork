@@ -14,21 +14,26 @@ class GlobalDiscriminator(nn.Module):
             nn.LeakyReLU(0.2, inplace=True),
             # Input layer does not have a batch normalization layer connected to it,
             # because it could lead to sample oscillation and model instability.
+
             # 2nd layer
             nn.Conv2d(D_HIDDEN, D_HIDDEN * 2, kernel_size=4, stride=2, padding=1, bias=False), # 64x64
-            nn.BatchNorm2d(D_HIDDEN * 2),
+            #nn.BatchNorm2d(D_HIDDEN * 2),
             nn.LeakyReLU(0.2, inplace=True),
+
             # 3rd layer
             nn.Conv2d(D_HIDDEN * 2, D_HIDDEN * 4, kernel_size=4, stride=2, padding=1, bias=False), # 32x32
-            nn.BatchNorm2d(D_HIDDEN * 4),
+            #nn.BatchNorm2d(D_HIDDEN * 4),
             nn.LeakyReLU(0.2, inplace=True),
+
             # 4th layer
             nn.Conv2d(D_HIDDEN * 4, D_HIDDEN * 8, kernel_size=4, stride=2, padding=1, bias=False), # 16x16
-            nn.BatchNorm2d(D_HIDDEN * 8),
+            #nn.BatchNorm2d(D_HIDDEN * 8),
             nn.LeakyReLU(0.2, inplace=True),
+
             # Output layer
             nn.Conv2d(D_HIDDEN * 8, 1, kernel_size=4, stride=1, padding=0, bias=False), # 13x13 -> 1x1 output
-            nn.Sigmoid()
+            # WGAN-GP: removed sigmoid as not using BCE, also normalizations are removed
+            # nn.Sigmoid()
         )
     def forward(self, x):
         # Output shape: [batch_size, 1, 1, 1] -> flatten to [batch_size]
@@ -48,21 +53,26 @@ class LocalDiscriminator(nn.Module):
             nn.LeakyReLU(0.2, inplace=True),
             # Input layer does not have a batch normalization layer connected to it,
             # because it could lead to sample oscillation and model instability.
+
             # 2nd layer
             nn.Conv2d(D_HIDDEN, D_HIDDEN * 2, kernel_size=4, stride=2, padding=1, bias=False), # (patch_size/4)x(patch_size/4)
-            nn.BatchNorm2d(D_HIDDEN * 2),
+            #nn.BatchNorm2d(D_HIDDEN * 2),
             nn.LeakyReLU(0.2, inplace=True),
+
             # 3rd layer
             nn.Conv2d(D_HIDDEN * 2, D_HIDDEN * 4, kernel_size=4, stride=2, padding=1, bias=False), # (patch_size/8)x(patch_size/8)
-            nn.BatchNorm2d(D_HIDDEN * 4),
+            #nn.BatchNorm2d(D_HIDDEN * 4),
             nn.LeakyReLU(0.2, inplace=True),
+
             # 4th layer
             nn.Conv2d(D_HIDDEN * 4, D_HIDDEN * 8, kernel_size=4, stride=2, padding=1, bias=False), # (patch_size/16)x(patch_size/16)
-            nn.BatchNorm2d(D_HIDDEN * 8),
+            #nn.BatchNorm2d(D_HIDDEN * 8),
             nn.LeakyReLU(0.2, inplace=True),
-            # output layer
+
+            # Output layer
             nn.Conv2d(D_HIDDEN * 8, 1, kernel_size=4, stride=1, padding=0, bias=False), # 1x1 output
-            nn.Sigmoid()
+            # WGAN-GP: removed sigmoid as not using BCE, also BN layers are removed
+            #nn.Sigmoid()
         )
     def forward(self, x):
         # return self.main(x).view(-1) # same bu make sure the dimensions are controlled!
@@ -99,7 +109,7 @@ class Discriminator(nn.Module):
 
         for b in range(B):
             mask_b = mask[b, 0]
-            ys, xs = mask[b].nonzero(as_tuple=True)
+            ys, xs = mask_b.nonzero(as_tuple=True)
 
             if len(xs) == 0 or len(ys) == 0:
                 # No mask, center crop
@@ -113,8 +123,10 @@ class Discriminator(nn.Module):
 
             left = max(0, center_x - patch_size // 2)
             top = max(0, center_y - patch_size // 2)
-            right = min(left + patch_size // 2, W)
-            bottom = min(top + patch_size // 2, H)
+            right = min(left + patch_size, W)
+            bottom = min(top + patch_size, H)
+            #right = min(left + patch_size // 2, W)
+            #bottom = min(top + patch_size // 2, H)
 
             if right - left < patch_size:
                 left = max(right - patch_size, 0)

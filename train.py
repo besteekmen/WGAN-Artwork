@@ -20,12 +20,16 @@ from datetime import datetime
 from tqdm import tqdm
 from multiprocessing import freeze_support
 
+# Import metrics to evaluate
+from torchmetrics.image.ssim import StructuralSimilarityIndexMeasure
+from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
+from torchmetrics.image.fid import FrechetInceptionDistance
+
 from config import *
-from utils import clear_folder
+from utils import clear_folder, to_unit, to_signed
 from data_utils import CroppedImageDataset
 from models.generator import Generator
 from models.discriminator import GlobalDiscriminator, LocalDiscriminator
-# TODO: Should I import global local coarse fine etc?
 from models.weights_init import weights_init_normal
 # TODO: Should I use this below:
 #os.environ["PYTHONUNBUFFERED"] = "1"
@@ -36,8 +40,28 @@ SAMPLE_SAVE_STEP = globals().get('SAMPLE_SAVE_STEP', 200) # batches
 CHECKPOINT_EVERY = globals().get('CHECKPOINT_EVERY', 1) # epochs
 
 # ---------------------
-# Utilities: Gram matrix and VGG extractor for style loss
+# Utilities: Gradient penalty, gram matrix and VGG extractors
 # ---------------------
+def gradient_penalty(critic, real, fake, device):
+    B, C, H, W = real.shape
+    alpha = torch.rand(B, 1, 1, 1, device=device)
+    interpolated = alpha * real + ((1 - alpha) * fake)
+    interpolated.requires_grad_(True)
+
+    critic_scores = critic(interpolated)
+
+    gradients = torch.autograd.grad(
+        outputs=critic_scores,
+        inputs=interpolated,
+        grad_outputs=torch.ones_like(critic_scores),
+        create_graph=True,
+        only_inputs=True,
+        retain_graph=True
+    )[0]
+
+    gradients = gradients.view(B, -1)
+    return ((gradients.norm(2, dim=1) - 1) ** 2).mean()
+
 def gram_matrix(features: torch.Tensor) -> torch.Tensor:
     """Calculate Gram matrix for style loss.
     Input (features): tensor of shape [B, C, H, W]
@@ -231,6 +255,7 @@ def main():
     # Define loss function and optimizer
     criterion = {
         "bce": nn.BCELoss(), # Binary Cross-Entropy loss function
+        # WGAN-GP: Do not use BCE to switch to the WGAN-GP principles!
         # TODO: Should I use BCEWithLogitsLoss and remove sigmoid layer?
         "l1": nn.L1Loss(), # L1 loss function
         "mse": nn.MSELoss() # MSE loss function
@@ -241,9 +266,10 @@ def main():
     # Hence make learning slower for D and faster for G (Contextual Attention GAN, Yu et al. 2018)
     # TODO: If good texture but broken structure, prioritize global (Izuka et al. 2017)
     # TODO: If discriminators are weak (not decreasing loss), use update ratios (WGAN-GP)
-    optimizer_netG = optim.Adam(netG.parameters(), lr=LR_G, betas=(0.5, 0.999))
-    optimizer_globalD = optim.Adam(globalD.parameters(), lr=LR_D, betas=(0.5, 0.999))
-    optimizer_localD = optim.Adam(localD.parameters(), lr=LR_D, betas=(0.5, 0.999))
+    # WGAN-GP: betas changed to (0.0, 0.9) from (0.5, 0.999)
+    optimizer_netG = optim.Adam(netG.parameters(), lr=LR_G, betas=(0.0, 0.9))
+    optimizer_globalD = optim.Adam(globalD.parameters(), lr=LR_D, betas=(0.0, 0.9))
+    optimizer_localD = optim.Adam(localD.parameters(), lr=LR_D, betas=(0.0, 0.9))
 
     # VGG style extractor (frozen)
     style_extractor = VGG19StyleExtractor(device=device).to(device)
@@ -286,6 +312,11 @@ def main():
     # Add a pin_memory=True argument when calling torch.utils.data.DataLoader()
     # on small datasets, to make sure data is stored at fixed GPU memory addresses
     # and thus increase the data loading speed during training.
+
+    # Initialize metrics
+    ssim = StructuralSimilarityIndexMeasure(data_range=1.0).to(device)
+    lpips = LearnedPerceptualImagePatchSimilarity(net_type='vgg').to(device)
+    fid = FrechetInceptionDistance(feature=2048, normalize=True).to(device)
 
     # Fixed samples for visualization
     fixed_masked = []
@@ -339,14 +370,16 @@ def main():
             mask_hole = (1.0 - mask_known).float().to(device)
 
             B = original.size(0)
+
             # Create real and fake label tensors in real time,
             # because there is no guarantee that all sample batches will have the same size
             # BCELoss (Binary Cross Entropy) operates on probabilities,
             # it expects both inputs and targets to be floating-point numbers in the range [0.0, 1.0].
-            real_labels = torch.full((B,), REAL_LABEL, device=device, dtype=torch.float)
-            fake_labels = torch.full((B,), FAKE_LABEL, device=device, dtype=torch.float)
+            # WGAN-GP: removed labels as BCE is not used anymore
+            #real_labels = torch.full((B,), REAL_LABEL, device=device, dtype=torch.float)
+            #fake_labels = torch.full((B,), FAKE_LABEL, device=device, dtype=torch.float)
 
-            # Step 1: Train discriminators
+            # Step 1: Train discriminators as critics (WGAN-GP)
             globalD.zero_grad()
             localD.zero_grad()
 
@@ -358,23 +391,43 @@ def main():
             # Create a dictionary to keep losses
             losses = {}
 
-            # Update globalD with real and fake data
-            losses["real_globalD"] = criterion["bce"](globalD(original), real_labels)
-            losses["fake_globalD"] = criterion["bce"](globalD(composite.detach()), fake_labels)
-            losses["globalD"] = 0.5 * (losses["fake_globalD"] + losses["real_globalD"])
+            # Update globalD for global critic
+            # backward and optimizer steps are called separately to not mix!
+            real_global = globalD(original)
+            fake_global = globalD(composite.detach())
+            gp_global = gradient_penalty(globalD, original, composite.detach(), device)
+            loss_globalD = (fake_global.mean() - real_global.mean()) + GP_LAMBDA * gp_global
+            loss_globalD.backward()
+            optimizer_globalD.step()
+            losses["globalD"] = loss_globalD.detach()
 
-            # Update localD with real and fake data
+            # WGAN-GP: removed parts using BCE
+            # Update globalD with real and fake data
+            #losses["real_globalD"] = criterion["bce"](globalD(original), real_labels)
+            #losses["fake_globalD"] = criterion["bce"](globalD(composite.detach()), fake_labels)
+            #losses["globalD"] = 0.5 * (losses["fake_globalD"] + losses["real_globalD"])
+
+            # Update localD for local critic
             real_patches = crop_local_patch(original, mask_hole)
             fake_patches = crop_local_patch(composite.detach(), mask_hole)
-            losses["real_localD"] = criterion["bce"](localD(real_patches), real_labels)
-            losses["fake_localD"] = criterion["bce"](localD(fake_patches), fake_labels)
-            losses["localD"] = 0.5 * (losses["fake_localD"] + losses["real_localD"])
-
-            # Loss backwards and optimizer step
-            losses["totalD"] = losses["globalD"] + losses["localD"]
-            losses["totalD"].backward()
-            optimizer_globalD.step()
+            real_local = localD(real_patches)
+            fake_local = localD(fake_patches)
+            gp_local = gradient_penalty(localD, real_patches, fake_patches, device)
+            loss_localD = (fake_local.mean() - real_local.mean()) + GP_LAMBDA * gp_local
+            loss_localD.backward()
             optimizer_localD.step()
+            losses["localD"] = loss_localD.detach()
+
+            # WGAN-GP: removed parts using BCE
+            # Update localD with real and fake data
+            #real_patches = crop_local_patch(original, mask_hole)
+            #fake_patches = crop_local_patch(composite.detach(), mask_hole)
+            #losses["real_localD"] = criterion["bce"](localD(real_patches), real_labels)
+            #losses["fake_localD"] = criterion["bce"](localD(fake_patches), fake_labels)
+            #losses["localD"] = 0.5 * (losses["fake_localD"] + losses["real_localD"])
+
+            # Final discriminator loss
+            losses["totalD"] = (losses["globalD"] + losses["localD"]).detach()
 
             # Step 2: Train generator
             netG.zero_grad()
@@ -384,11 +437,19 @@ def main():
             # composite: keep known regions from original, fill holes with fake
             composite = fake * mask_hole + original * (1.0 - mask_hole)
 
-            # Calculate losses
-            losses["adv_globalD"] = criterion["bce"](globalD(composite), real_labels)
+            # Adversarial (negated critic scores)
+            adv_global = -globalD(composite).mean()
             patches = crop_local_patch(composite, mask_hole)
-            losses["adv_localD"] = criterion["bce"](localD(patches), real_labels)
-            losses["adv"] = losses["adv_globalD"] + losses["adv_localD"]
+            adv_local = -localD(patches).mean()
+            losses["adv"] = adv_global + adv_local
+
+            # WGAN-GP: removed parts using BCE
+            # Calculate losses
+            #losses["adv_globalD"] = criterion["bce"](globalD(composite), real_labels)
+            #patches = crop_local_patch(composite, mask_hole)
+            #losses["adv_localD"] = criterion["bce"](localD(patches), real_labels)
+            #losses["adv"] = losses["adv_globalD"] + losses["adv_localD"]
+
             # Pixel-wise reconstruction loss
             # Weighted l1 loss: https://arxiv.org/pdf/2401.03395
             # Also weighted: https://arxiv.org/pdf/1801.07892
@@ -396,7 +457,6 @@ def main():
             losses["hole"] = criterion["l1"](fake * mask_hole, original * mask_hole)
             losses["valid"] = criterion["l1"](fake * (1.0 - mask_hole), original * (1.0 - mask_hole))
             losses["l1"] = HOLE_LAMBDA * losses["hole"] + VALID_LAMBDA * losses["valid"]
-            # TODO: What about perceptual loss?
 
             # Style loss calculation
             real_features = style_extractor(original)
@@ -406,11 +466,12 @@ def main():
             # Perceptual loss calculation
             losses["perceptual"] = perceptual_loss_func(original, composite)
 
-            # Loss backwards and optimizer step
+            # Final generator loss
             losses["totalG"] = (losses["adv"] +
                                 L1_LAMBDA * losses["l1"] +
                                 STYLE_LAMBDA * losses["style"] +
                                 PERCEPTUAL_LAMBDA * losses["perceptual"])
+            # Loss backwards and optimizer step
             losses["totalG"].backward()
             optimizer_netG.step()
 
@@ -433,7 +494,9 @@ def main():
                 with torch.no_grad():
                     vis_fake = netG(original, mask_hole)
                     vis_comp = vis_fake * mask_hole + original * (1.0 - mask_hole)
-                    grid = torch.cat([original, masked, vis_comp], 1) # horizontal stack per sample
+                    grid = torch.cat(
+                        [to_unit(original), to_unit(masked), to_unit(vis_comp)],
+                        1) # horizontal stack per sample
                     vutils.save_image(grid,
                                       os.path.join(OUT_PATH, f'comparison_epoch({epoch})_batch({i}).png'),
                                       normalize=True,
@@ -461,12 +524,35 @@ def main():
         with torch.no_grad():
             fixed_fake = netG(fixed_original, fixed_mask_hole)
             fixed_comp = fixed_fake * fixed_mask_hole + fixed_original * (1.0 - fixed_mask_hole)
-            grid = torch.cat([fixed_original, fixed_masked, fixed_comp], 0)
+
+            unit_original = to_unit(fixed_original)
+            unit_comp = to_unit(fixed_comp)
+            unit_masked = to_unit(fixed_masked)
+
+            ssim_val = ssim(unit_comp, unit_original).item()
+            lpips_val = lpips(unit_comp, unit_original).item()
+
+            find_val = None
+            if (epoch + 1) % 5 == 0:
+                fid.reset()
+                fid.update(unit_original, real=True)
+                fid.update(unit_comp, real=False)
+                fid_val = fid.compute().item()
+
+            print(f"Epoch {epoch+1}: SSIM={ssim_val:.4f} LPIPS={lpips_val:.4f}", end="")
+            if fid_val is not None:
+                print(f", FID={fid_val:.2f}")
+            else:
+                print("")
+
+            grid = torch.cat(
+                [unit_original, unit_masked, unit_comp],
+                0)
             vutils.save_image(
                 grid,
                 os.path.join(OUT_PATH, f'fixed_epoch{epoch+1}.png'),
                 normalize=True,
-                nrow=BATCH_SIZE # TODO: Or fixed_original.size(0)?
+                nrow=fixed_original.size(0) # TODO: Or BATCH_SIZE?
             )
 
     print('Training complete!')

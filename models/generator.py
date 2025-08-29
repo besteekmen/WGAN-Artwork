@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+from utils import to_signed
 from config import *
 
 class GatedConv2d(nn.Module):
@@ -84,6 +85,7 @@ class CoarseGenerator(nn.Module):
             nn.Tanh()
         )
     def forward(self, x):
+        # x expected at full resolution (e.g. 256x256)
         x = self.encoder(x)
         x = self.middle(x)
         x = self.decoder(x)
@@ -97,6 +99,7 @@ class FineGenerator(nn.Module):
     Refines the coarse output with gated convolutions.
     - Gating controls feature propagation
     - BatchNorm would mix statistics between masked/unmasked regions
+    - Avoid BatchNorm for WGAN-GP as it can introduce correlation across batch samples and destabilize
     - Keeps mask-aware nature of layers
     Skips normalization in encoder&middle (Yu et al., 2019) to
     do not weaken the gating affect of gated con. But apply in decoder
@@ -163,16 +166,18 @@ class Generator(nn.Module):
         # Mask: keep background, replace masked area with mask channel
         # Masked input is created internally,
         # feed to generator only the original and the mask
-        masked_input = torch.cat([image * (1 - mask), mask], 1)
+        # scale the mask from [0,1] to [-1,1] to not bias the generator
+        mask_scaled = to_signed(mask)
+        masked_input = torch.cat([image * (1 - mask_scaled), mask_scaled], 1)
 
         # Stage 1: Coarse prediction
         coarse_output = self.coarse_gen(masked_input)
 
         # Blend coarse output with known regions
-        blended_output = coarse_output * mask + image * (1 - mask)
+        blended_output = coarse_output * mask_scaled + image * (1 - mask_scaled)
 
         # Stage 2: Fine prediction
-        fine_input = torch.cat([blended_output, mask], 1)
+        fine_input = torch.cat([blended_output, mask_scaled], 1)
         fine_output = self.fine_gen(fine_input)
 
         return fine_output
