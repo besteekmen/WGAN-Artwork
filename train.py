@@ -19,6 +19,7 @@ import torchvision.utils as vutils
 from datetime import datetime
 from tqdm import tqdm
 from multiprocessing import freeze_support
+from torch.cuda.amp import autocast, GradScaler
 
 # Import metrics to evaluate
 from torchmetrics.image.ssim import StructuralSimilarityIndexMeasure
@@ -27,7 +28,7 @@ from torchmetrics.image.fid import FrechetInceptionDistance
 
 from config import *
 from utils import clear_folder, to_unit, to_signed
-from data_utils import CroppedImageDataset
+from data_utils import CroppedImageDataset, make_dataloader
 from models.generator import Generator
 from models.discriminator import GlobalDiscriminator, LocalDiscriminator
 from models.weights_init import weights_init_normal
@@ -35,7 +36,6 @@ from models.weights_init import weights_init_normal
 #os.environ["PYTHONUNBUFFERED"] = "1"
 
 # Optional config fallbacks
-OUT_PATH = globals().get('OUT_PATH', 'out')
 SAMPLE_SAVE_STEP = globals().get('SAMPLE_SAVE_STEP', 200) # batches
 CHECKPOINT_EVERY = globals().get('CHECKPOINT_EVERY', 1) # epochs
 
@@ -73,18 +73,21 @@ def gram_matrix(features: torch.Tensor) -> torch.Tensor:
 
 class VGG19StyleExtractor(nn.Module):
     """Extract intermediate feature maps from VGG19 for style loss (frozen)."""
-    def __init__(self, device, layers=None):
+    def __init__(self, layers=None):
         super().__init__()
-        vgg = tvmodels.vgg19(pretrained=True).features.to(device).eval()
+        vgg = tvmodels.vgg19(pretrained=True).features.eval()
         for param in vgg.parameters():
             param.requires_grad = False
         self.vgg = vgg
         # common relu layers to use for style Gram: relu1_1, relu2_1, relu3_1, relu4_1
         # module indices: relu1_1='1', relu2_1='6', relu3_1='11', relu4_1='20'
-        self.layers = layers or ['1', '6', '11', '20']
-        # store ImageNet mean/std statistics for normalization (could be done with register_buffer later)
-        self.mean = torch.Tensor([0.485, 0.456, 0.406], device=device).view(1, 3, 1, 1)
-        self.std = torch.Tensor([0.229, 0.224, 0.225], device=device).view(1, 3, 1, 1)
+        self.layers = [int(x) for x in (layers or [1, 6, 11, 20])]
+        #layers or ['1', '6', '11', '20']
+        # store ImageNet mean/std statistics for normalization
+        self.register_buffer(
+            'mean', torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1))
+        self.register_buffer(
+            'std', torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1))
 
     def forward(self, x):
         # Rescale from [-1, 1] to [0, 1]
@@ -94,37 +97,34 @@ class VGG19StyleExtractor(nn.Module):
         # Pass through VGG and extract chosen layers
         features = []
         cur = x
-        for name, layer in self.vgg.named_children():
+        #for name, layer in self.vgg.named_children():
+        for idx, layer in enumerate(self.vgg):
             cur = layer(cur)
-            if name in self.layers:
+            #if name in self.layers:
+            if idx in self.layers:
                 features.append(cur)
-                if len(features) == len(self.layers):
-                    break
+                #if len(features) == len(self.layers):
+                #    break
         return features
-
-def style_loss(real_features, fake_features, criterion):
-    """Compute style loss between real and fake feature maps."""
-    loss = 0
-    for rf, ff in zip(real_features, fake_features):
-        loss += criterion["mse"](gram_matrix(rf), gram_matrix(ff))
-    return loss
 
 # Perceptual loss helps generator to match semantic structures instead of only textures or pixels.
 # Yu et al 2018 Contextual attention, Liu et al 2018 partial convolutions etc uses both style and perceptual
 class VGG16PerceptualLoss(nn.Module):
     """Perceptual loss for VGG16.
     Compare feature maps of real and generated images."""
-    def __init__(self, device, layers=None, resize=True):
+    def __init__(self, layers=None, resize=True):
         super().__init__()
-        vgg = tvmodels.vgg16(pretrained=True).features.to(device).eval()
+        vgg = tvmodels.vgg16(pretrained=True).features.eval()
         for param in vgg.parameters():
             param.requires_grad = False
         self.vgg = vgg
         # Default layers for perceptual loss (relu1_2, relu2_2, relu3_3, relu4_3)
-        self.layers = layers or ['3', '8', '15', '22']
-        # store ImageNet mean/std statistics for normalization (could be done with register_buffer later)
-        self.mean = torch.Tensor([0.485, 0.456, 0.406], device=device).view(1, 3, 1, 1)
-        self.std = torch.Tensor([0.229, 0.224, 0.225], device=device).view(1, 3, 1, 1)
+        self.layers = [int(x) for x in (layers or [3, 8, 15, 22])]
+        # store ImageNet mean/std statistics for normalization
+        self.register_buffer(
+            'mean', torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1))
+        self.register_buffer(
+            'std', torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1))
         self.criterion = nn.MSELoss() # TODO: use criterion dict later?
 
     def forward(self, real, fake):
@@ -143,14 +143,12 @@ class VGG16PerceptualLoss(nn.Module):
         fake_features = []
         x_real = real
         x_fake = fake
-        for name, layer in self.vgg.named_children():
+        for idx, layer in enumerate(self.vgg):
             x_real = layer(x_real)
             x_fake = layer(x_fake)
-            if name in self.layers:
+            if idx in self.layers:
                 real_features.append(x_real)
                 fake_features.append(x_fake)
-                if len(real_features) == len(self.layers):
-                    break
 
         # Compute MSE between features
         loss = 0
@@ -159,8 +157,31 @@ class VGG16PerceptualLoss(nn.Module):
         return loss
 
 # ---------------------
-# Helper: Crop a local square patch centered on mask bounding box
+# Helper functions:
 # ---------------------
+def style_loss(real_features, fake_features, criterion):
+    """Compute style loss between real and fake feature maps."""
+    loss = 0
+    for rf, ff in zip(real_features, fake_features):
+        loss += criterion["mse"](gram_matrix(rf), gram_matrix(ff))
+    return loss
+
+def style_perceptual_loss(original, composite, style_extractor, perceptual_loss_func, criterion):
+    """Computes style and perceptual losses per batch.
+    original, composite: [B, 3, H, W] values in [-1, 1]"""
+
+    # Compute VGG features in mixed precision for less GPU load
+    with autocast():
+        # Style loss
+        real_features = style_extractor(original)
+        fake_features = style_extractor(composite)
+        style = style_loss(real_features, fake_features, criterion)
+
+        # Perceptual loss
+        perceptual = perceptual_loss_func(original, composite)
+
+    return style, perceptual
+
 def crop_local_patch(images: torch.Tensor, masks_hole: torch.Tensor, patch_size: int = LOCAL_PATCH_SIZE) -> torch.Tensor:
     """
     images: tensor of shape [B, C, H, W],
@@ -209,8 +230,9 @@ def crop_local_patch(images: torch.Tensor, masks_hole: torch.Tensor, patch_size:
 def main():
     freeze_support() # for Windows multiprocessing
 
-    # Todo: Setup out folder and logging
-    #clear_folder(OUT_PATH)
+    # Todo: Setup logging
+    # Make sure output folder exists and clean
+    clear_folder(OUT_PATH)
     # os.makedirs(OUT_PATH, exists_ok=True)
 
     # Setup seed for randomness (if not pre-defined)
@@ -229,6 +251,8 @@ def main():
     device = torch.device("cuda:0" if cuda_available else "cpu")
     print("Device:", torch.cuda.get_device_name(0) if cuda_available else "CPU only\n")
 
+    # enable below if exact reproducibility is needed, also disable benchmark
+    #cudnn.deterministic = True
     # Setup cudnn benchmark
     cudnn.benchmark = True  # Enable benchmark mode for fixed input size
     # Tells cuDNN to choose the best set of algorithms for the model
@@ -254,8 +278,8 @@ def main():
 
     # Define loss function and optimizer
     criterion = {
-        "bce": nn.BCELoss(), # Binary Cross-Entropy loss function
         # WGAN-GP: Do not use BCE to switch to the WGAN-GP principles!
+        # Hence BCE is removed. Also rather than BCEWithLogitsLoss, WGAN used
         # TODO: Should I use BCEWithLogitsLoss and remove sigmoid layer?
         "l1": nn.L1Loss(), # L1 loss function
         "mse": nn.MSELoss() # MSE loss function
@@ -272,46 +296,24 @@ def main():
     optimizer_localD = optim.Adam(localD.parameters(), lr=LR_D, betas=(0.0, 0.9))
 
     # VGG style extractor (frozen)
-    style_extractor = VGG19StyleExtractor(device=device).to(device)
-
+    style_extractor = VGG19StyleExtractor().to(device)
     # VGG perceptual loss
-    perceptual_loss_func = VGG16PerceptualLoss(device=device).to(device)
+    perceptual_loss_func = VGG16PerceptualLoss().to(device)
 
-    # Dataset and loader
+    # Grad scaler defined for faster training and lower memory usage
+    scalerG = GradScaler()
+    scaler_globalD = GradScaler()
+    scaler_localD = GradScaler()
+    # They will scale losses for mixed precision
+
+    # Datasets and loaders
     # CroppedImageDataset already applies transforms (ToTensor + Normalize to [-1, 1])
-    dataset = CroppedImageDataset(crops_dir=CROP_PATH)
+    # To use a different transform, create one here and add as parameter below!
+    train_set = CroppedImageDataset(crops_dir=os.path.join(DATA_PATH, 'train'), split='train')
+    val_set = CroppedImageDataset(crops_dir=os.path.join(DATA_PATH, 'val'), split='val')
 
-    # TODO (Another data): Change accordingly to use another data (colored image data)
-    # dataset = dset.ImageFolder(root=DATA_PATH,
-    #                            transform=transforms.Compose([
-    #                                transforms.Resize(X_DIM),
-    #                                transforms.CenterCrop(X_DIM),
-    #                                transforms.ToTensor(),
-    #                                transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
-    #                            ]))
-
-    assert len(dataset) > 0, f"No crops found in {CROP_PATH} - run preextract-... first!"
-    # Try high-performance dataloader
-    try:
-        dataloader = torch.utils.data.DataLoader(
-            dataset,
-            batch_size=BATCH_SIZE,
-            shuffle=True,
-            num_workers=NUM_WORKERS,
-            pin_memory=cuda_available
-        )
-        _ = next(iter(dataloader))  # force load to test
-    except Exception as e:
-        print("High-performance dataloader error, falling back to num_workers=0:", e)
-        dataloader = torch.utils.data.DataLoader(
-            dataset,
-            batch_size=BATCH_SIZE,
-            shuffle=True,
-            num_workers=0
-        )
-    # Add a pin_memory=True argument when calling torch.utils.data.DataLoader()
-    # on small datasets, to make sure data is stored at fixed GPU memory addresses
-    # and thus increase the data loading speed during training.
+    train_loader = make_dataloader(train_set, 'train', BATCH_SIZE, NUM_WORKERS, cuda=cuda_available)
+    val_loader = make_dataloader(val_set, 'val', BATCH_SIZE, NUM_WORKERS, cuda=cuda_available)
 
     # Initialize metrics
     ssim = StructuralSimilarityIndexMeasure(data_range=1.0).to(device)
@@ -322,8 +324,8 @@ def main():
     fixed_masked = []
     fixed_original = []
     fixed_mask_hole = []
-    for i in range(min(BATCH_SIZE, len(dataset))):
-        m_img, o_img, m_known = dataset[i]
+    for i in range(min(BATCH_SIZE, len(train_set))):
+        m_img, o_img, m_known = train_set[i]
         fixed_masked.append(m_img.unsqueeze(0))
         fixed_original.append(o_img.unsqueeze(0))
         fixed_mask_hole.append((1.0 - m_known).unsqueeze(0))
@@ -344,7 +346,8 @@ def main():
         "totalG": [],
         "totalD": [],
         "globalD": [],
-        "localD": []
+        "localD": [],
+        "valG": [] # added for validation
     }
 
     # Training loop
@@ -353,102 +356,82 @@ def main():
     start_time = datetime.now()
 
     for epoch in range(EPOCH_NUM):
-        dataloader_tqdm = tqdm(
-            enumerate(dataloader),
-            total=len(dataloader),
+        train_tqdm = tqdm(
+            enumerate(train_loader),
+            total=len(train_loader),
             desc=f"Epoch {epoch + 1} / {EPOCH_NUM}",
             leave=True,
             ncols=100
         )
-        for i, (masked, original, mask_known) in dataloader_tqdm:
+        for i, (masked, original, mask_known) in train_tqdm:
             # dataset returns batches of: masked, original, mask_known (1=known)
             masked = masked.to(device)
             original = original.to(device)
             mask_known = mask_known.to(device)
-
             # convert to hole-mask (1=hole, 0=known) for generator
             mask_hole = (1.0 - mask_known).float().to(device)
 
-            B = original.size(0)
-
-            # Create real and fake label tensors in real time,
-            # because there is no guarantee that all sample batches will have the same size
-            # BCELoss (Binary Cross Entropy) operates on probabilities,
-            # it expects both inputs and targets to be floating-point numbers in the range [0.0, 1.0].
-            # WGAN-GP: removed labels as BCE is not used anymore
-            #real_labels = torch.full((B,), REAL_LABEL, device=device, dtype=torch.float)
-            #fake_labels = torch.full((B,), FAKE_LABEL, device=device, dtype=torch.float)
+            # Create a dictionary to keep losses
+            losses = {}
 
             # Step 1: Train discriminators as critics (WGAN-GP)
             globalD.zero_grad()
             localD.zero_grad()
 
+            # Scaler: with autocast(): (add for the following 4 lines up to gap)
             # Generate the full fake image (coarse + fine)
             fake = netG(original, mask_hole)
             # composite: keep known regions from original, fill holes with fake
             composite = fake * mask_hole + original * (1.0 - mask_hole)
 
-            # Create a dictionary to keep losses
-            losses = {}
+            # Create detached versions to avoid multiple forwarding of generator
+            fake_detached = fake.detach()
+            composite_detached = fake_detached * mask_hole + original * (1.0 - mask_hole)
 
+            # Scaler: with autocast(): (add for the following lines up to gap loss backward)
             # Update globalD for global critic
             # backward and optimizer steps are called separately to not mix!
             real_global = globalD(original)
-            fake_global = globalD(composite.detach())
-            gp_global = gradient_penalty(globalD, original, composite.detach(), device)
+            fake_global = globalD(composite_detached)
+            gp_global = gradient_penalty(globalD, original, composite_detached, device)
             loss_globalD = (fake_global.mean() - real_global.mean()) + GP_LAMBDA * gp_global
             loss_globalD.backward()
             optimizer_globalD.step()
+            # Scaler: add below lines instead of above backward and step
+            # scaler_globalD.scale(loss_globalD).backward()
+            # scaler_globalD.step(optimizer_globalD)
+            # scaler_globalD.update()
             losses["globalD"] = loss_globalD.detach()
 
-            # WGAN-GP: removed parts using BCE
-            # Update globalD with real and fake data
-            #losses["real_globalD"] = criterion["bce"](globalD(original), real_labels)
-            #losses["fake_globalD"] = criterion["bce"](globalD(composite.detach()), fake_labels)
-            #losses["globalD"] = 0.5 * (losses["fake_globalD"] + losses["real_globalD"])
-
             # Update localD for local critic
+            # Using detached versions for discriminator is okay, but not okay for generator
             real_patches = crop_local_patch(original, mask_hole)
-            fake_patches = crop_local_patch(composite.detach(), mask_hole)
+            fake_patches = crop_local_patch(composite_detached, mask_hole)
+            # Scaler: with autocast(): (add for the following lines up to gap loss backward)
             real_local = localD(real_patches)
             fake_local = localD(fake_patches)
             gp_local = gradient_penalty(localD, real_patches, fake_patches, device)
             loss_localD = (fake_local.mean() - real_local.mean()) + GP_LAMBDA * gp_local
             loss_localD.backward()
             optimizer_localD.step()
+            # Scaler: add below lines instead of above backward and step
+            # scaler_localD.scale(loss_localD).backward()
+            # scaler_localD.step(optimizer_localD)
+            # scaler_localD.update()
             losses["localD"] = loss_localD.detach()
-
-            # WGAN-GP: removed parts using BCE
-            # Update localD with real and fake data
-            #real_patches = crop_local_patch(original, mask_hole)
-            #fake_patches = crop_local_patch(composite.detach(), mask_hole)
-            #losses["real_localD"] = criterion["bce"](localD(real_patches), real_labels)
-            #losses["fake_localD"] = criterion["bce"](localD(fake_patches), fake_labels)
-            #losses["localD"] = 0.5 * (losses["fake_localD"] + losses["real_localD"])
 
             # Final discriminator loss
             losses["totalD"] = (losses["globalD"] + losses["localD"]).detach()
 
             # Step 2: Train generator
             netG.zero_grad()
-
-            # Generate the full fake image (coarse + fine)
-            fake = netG(original, mask_hole)
-            # composite: keep known regions from original, fill holes with fake
-            composite = fake * mask_hole + original * (1.0 - mask_hole)
+            # Scaler: with autocast(): (add for the following lines up to gap loss backward)
 
             # Adversarial (negated critic scores)
             adv_global = -globalD(composite).mean()
             patches = crop_local_patch(composite, mask_hole)
             adv_local = -localD(patches).mean()
             losses["adv"] = adv_global + adv_local
-
-            # WGAN-GP: removed parts using BCE
-            # Calculate losses
-            #losses["adv_globalD"] = criterion["bce"](globalD(composite), real_labels)
-            #patches = crop_local_patch(composite, mask_hole)
-            #losses["adv_localD"] = criterion["bce"](localD(patches), real_labels)
-            #losses["adv"] = losses["adv_globalD"] + losses["adv_localD"]
 
             # Pixel-wise reconstruction loss
             # Weighted l1 loss: https://arxiv.org/pdf/2401.03395
@@ -458,13 +441,10 @@ def main():
             losses["valid"] = criterion["l1"](fake * (1.0 - mask_hole), original * (1.0 - mask_hole))
             losses["l1"] = HOLE_LAMBDA * losses["hole"] + VALID_LAMBDA * losses["valid"]
 
-            # Style loss calculation
-            real_features = style_extractor(original)
-            fake_features = style_extractor(composite)
-            losses["style"] = style_loss(real_features, fake_features, criterion)
-
-            # Perceptual loss calculation
-            losses["perceptual"] = perceptual_loss_func(original, composite)
+            # Style and perceptual loss per batch
+            losses["style"], losses["perceptual"] = style_perceptual_loss(
+                original, composite, style_extractor, perceptual_loss_func, criterion
+            )
 
             # Final generator loss
             losses["totalG"] = (losses["adv"] +
@@ -474,6 +454,10 @@ def main():
             # Loss backwards and optimizer step
             losses["totalG"].backward()
             optimizer_netG.step()
+            # Scaler: add below lines instead of above backward and step
+            # scaler_G.scale(losses["totalG"]).backward()
+            # scaler_G.step(optimizer_netG)
+            # scaler_G.update()
 
             # Log losses
             losses_log["totalG"].append(losses["totalG"].item())
@@ -483,7 +467,7 @@ def main():
 
             # Print the progress
             if i % 100 == 0:
-                dataloader_tqdm.set_postfix({
+                train_tqdm.set_postfix({
                     'G': losses["totalG"].item(),
                     'D': losses["totalD"].item(),
                     'gD': losses["globalD"].item(),
@@ -492,8 +476,8 @@ def main():
 
                 # save a batch of image comparisons
                 with torch.no_grad():
-                    vis_fake = netG(original, mask_hole)
-                    vis_comp = vis_fake * mask_hole + original * (1.0 - mask_hole)
+                    vis_fake = fake # or fake.detach().clone()?
+                    vis_comp = composite # clone can be used if the tensor is manipulated later
                     grid = torch.cat(
                         [to_unit(original), to_unit(masked), to_unit(vis_comp)],
                         1) # horizontal stack per sample
@@ -504,15 +488,53 @@ def main():
             global_step += 1
 
         # Compute and store average losses for the current epoch
-        avg_totalG = sum(losses_log["totalG"][-len(dataloader):]) / len(dataloader)
-        avg_totalD = sum(losses_log["totalD"][-len(dataloader):]) / len(dataloader)
-        avg_globalD = sum(losses_log["globalD"][-len(dataloader):]) / len(dataloader)
-        avg_localD = sum(losses_log["localD"][-len(dataloader):]) / len(dataloader)
+        avg_totalG = sum(losses_log["totalG"][-len(train_loader):]) / len(train_loader)
+        avg_totalD = sum(losses_log["totalD"][-len(train_loader):]) / len(train_loader)
+        avg_globalD = sum(losses_log["globalD"][-len(train_loader):]) / len(train_loader)
+        avg_localD = sum(losses_log["localD"][-len(train_loader):]) / len(train_loader)
 
         epoch_log["totalG"].append(avg_totalG)
         epoch_log["totalD"].append(avg_totalD)
         epoch_log["globalD"].append(avg_globalD)
         epoch_log["localD"].append(avg_localD)
+
+        # Validation loop
+        val_losses = []
+        with torch.no_grad():
+            for masked, original, mask_known in val_loader:
+                masked = masked.to(device)
+                original = original.to(device)
+                mask_known = mask_known.to(device)
+                mask_hole = (1.0 - mask_known).float().to(device)
+
+                fake = netG(original, mask_hole)
+                composite = fake * mask_hole + original * (1.0 - mask_hole)
+
+                # Adversarial (negated critic scores)
+                adv_global = -globalD(composite).mean()
+                patches = crop_local_patch(composite, mask_hole)
+                adv_local = -localD(patches).mean()
+                adv_loss = adv_global + adv_local
+
+                hole_loss = criterion["l1"](fake * mask_hole, original * mask_hole)
+                valid_loss = criterion["l1"](fake * (1.0 - mask_hole), original * (1.0 - mask_hole))
+                l1_loss = HOLE_LAMBDA * hole_loss + VALID_LAMBDA * valid_loss
+
+                # Style and perceptual loss calculation per batch
+                style_l, perceptual_l = style_perceptual_loss(
+                    original, composite, style_extractor, perceptual_loss_func, criterion
+                )
+
+                # Final generator loss
+                totalG_val_loss = (adv_loss +
+                                   L1_LAMBDA * l1_loss +
+                                   STYLE_LAMBDA * style_l +
+                                   PERCEPTUAL_LAMBDA * perceptual_l)
+                val_losses.append(totalG_val_loss.item())
+
+        avg_valG = sum(val_losses) / len(val_losses)
+        epoch_log["valG"].append(avg_valG)
+        print(f"Validation Epoch: {epoch+1}: G={avg_valG:.4f}")
 
         # Save Generator and Discriminator
         if (epoch + 1) % CHECKPOINT_EVERY == 0:
@@ -522,8 +544,8 @@ def main():
 
         # Save fixed samples to track progress on same inputs
         with torch.no_grad():
-            fixed_fake = netG(fixed_original, fixed_mask_hole)
-            fixed_comp = fixed_fake * fixed_mask_hole + fixed_original * (1.0 - fixed_mask_hole)
+            fixed_fake = netG(fixed_original, fixed_mask_hole).detach()
+            fixed_comp = fixed_fake * fixed_mask_hole + fixed_original * (1.0 - fixed_mask_hole).detach()
 
             unit_original = to_unit(fixed_original)
             unit_comp = to_unit(fixed_comp)
@@ -532,7 +554,7 @@ def main():
             ssim_val = ssim(unit_comp, unit_original).item()
             lpips_val = lpips(unit_comp, unit_original).item()
 
-            find_val = None
+            fid_val = None
             if (epoch + 1) % 5 == 0:
                 fid.reset()
                 fid.update(unit_original, real=True)

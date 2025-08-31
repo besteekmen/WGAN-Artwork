@@ -96,6 +96,31 @@ class CroppedImageDataset(Dataset):
         print(f"Found {len(all_crops)} crop images.")
         return all_crops
 
+def make_dataloader(dataset, set_path, batch_size, num_workers, cuda, shuffle=True):
+    assert len(dataset) > 0, f"No crops found in {set_path} set!"
+    # Try high-performance dataloader
+    try:
+        dataloader = torch.utils.data.DataLoader(
+            dataset,
+            batch_size=batch_size,
+            shuffle=shuffle,
+            num_workers=num_workers,
+            pin_memory=cuda
+        )
+        _ = next(iter(dataloader))  # force load to test
+    except Exception as e:
+        print("High-performance dataloader error, falling back to num_workers=0:", e)
+        dataloader = torch.utils.data.DataLoader(
+            dataset,
+            batch_size=batch_size,
+            shuffle=shuffle,
+            num_workers=0
+        )
+    # Add a pin_memory=True argument when calling torch.utils.data.DataLoader()
+    # on small datasets, to make sure data is stored at fixed GPU memory addresses
+    # and thus increase the data loading speed during training.
+    return dataloader
+
 def preextract_fivecrops(source_dir, target_dir, crop_size=LOCAL_PATCH_SIZE):
     """
     Extract five fixed size crops (center + 4 corners) from each image,

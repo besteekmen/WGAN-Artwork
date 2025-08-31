@@ -4,7 +4,7 @@ import os
 SEED = 42
 
 # --- Training settings ---
-BATCH_SIZE = 128
+BATCH_SIZE = 16 # reduced from 128 to avoid OOM
 # BATCH_SIZE has a major impact on how much GPU memory the code will consume!
 # If not sure what batch size is appropriate:
 # 1. Start at a small value
@@ -45,13 +45,14 @@ PERCEPTUAL_LAMBDA = 0.05 # If textures too blurry, try 0.1
 GP_LAMBDA = 10.0 # WGAN-GP penalty weight
 
 # --- Datasets and paths ---
+OUT_PATH = 'out'
 SOURCE_PATH = 'data/wikiart' # Root of dataset
 DATA_PATH = 'data'
 CROP_PATH = 'data/crops'
 SAMPLE_PATH = 'img'
 CROP_SIZE = 256
 CROP_COUNT = 1 # TODO: Random crop is used to crop only 1 patch!
-NUM_WORKERS = 2 # TODO: try 4
+NUM_WORKERS = 4 # TODO: try 2
 # LOG_FILE = os.path.join(OUT_PATH, 'log.txt')
 
 # --- Labels for fake and real images (WGAN-GP: Not used anymore!) ---
