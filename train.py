@@ -301,9 +301,9 @@ def main():
     perceptual_loss_func = VGG16PerceptualLoss().to(device)
 
     # Grad scaler defined for faster training and lower memory usage
-    scalerG = GradScaler()
-    scaler_globalD = GradScaler()
-    scaler_localD = GradScaler()
+    #scalerG = GradScaler()
+    #scaler_globalD = GradScaler()
+    #scaler_localD = GradScaler()
     # They will scale losses for mixed precision
 
     # Datasets and loaders
@@ -356,6 +356,10 @@ def main():
     start_time = datetime.now()
 
     for epoch in range(EPOCH_NUM):
+        # Check GPU memory
+        #if cuda_available:
+        #    print(torch.cuda.memory_allocated())
+
         train_tqdm = tqdm(
             enumerate(train_loader),
             total=len(train_loader),
@@ -447,7 +451,7 @@ def main():
             )
 
             # Final generator loss
-            losses["totalG"] = (losses["adv"] +
+            losses["totalG"] = (ADV_LAMBDA * losses["adv"] +
                                 L1_LAMBDA * losses["l1"] +
                                 STYLE_LAMBDA * losses["style"] +
                                 PERCEPTUAL_LAMBDA * losses["perceptual"])
