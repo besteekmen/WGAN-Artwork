@@ -60,8 +60,9 @@ class CroppedImageDataset(Dataset):
                 top = random.randint(0, height - block_size)
                 left = random.randint(0, width - block_size)
 
-            mask = torch.ones_like(crop)
+            mask = torch.ones(1, height, width, dtype=torch.float32) # [1, H, W]
             mask[:, top:top + block_size, left:left + block_size] = 0
+            # due to automatic broadcast, below works despite the channel mismatch
             masked_crop = crop * mask
 
             # mask here is human-friendly version, need to be converted for generator
