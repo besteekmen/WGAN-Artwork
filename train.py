@@ -1,8 +1,6 @@
-import os
 # import random (to not use np.random instead)
+import os
 import sys
-from os import environ
-
 import numpy as np
 import matplotlib.pyplot as plt
 import torch
@@ -16,6 +14,7 @@ import torchvision.datasets as dset
 import torchvision.models as tvmodels
 import torchvision.transforms as transforms
 import torchvision.utils as vutils
+from os import environ
 from datetime import datetime
 from tqdm import tqdm
 from multiprocessing import freeze_support
@@ -183,6 +182,15 @@ def style_perceptual_loss(original, composite, style_extractor, perceptual_loss_
     perceptual = perceptual_loss_func(original, composite)
 
     return style, perceptual
+
+def multiscale_downsample(img, scales=None):
+    """Return a list of images downsampled to different scales."""
+    if scales is None:
+        scales = [1.0, 0.5, 0.25]
+    return [F.interpolate(img,
+                          scale_factor=s,
+                          mode='bilinear',
+                          align_corners=False) for s in scales]
 
 def crop_local_patch(images: torch.Tensor, masks_hole: torch.Tensor, patch_size: int = LOCAL_PATCH_SIZE) -> torch.Tensor:
     """
@@ -451,19 +459,33 @@ def main():
                 adv_local = -localD(patches).mean()
                 losses["adv"] = adv_global + adv_local
 
-                # Pixel-wise reconstruction loss
-                # Weighted l1 loss: https://arxiv.org/pdf/2401.03395
-                # Also weighted: https://arxiv.org/pdf/1801.07892
-                # Training only the masked area may cause seam artifacts at boundary and inconsistencies
-                losses["hole"] = criterion["l1"](fake * mask_hole, original * mask_hole)
-                losses["valid"] = criterion["l1"](fake * (1.0 - mask_hole), original * (1.0 - mask_hole))
-                losses["l1"] = HOLE_LAMBDA * losses["hole"] + VALID_LAMBDA * losses["valid"]
+                # Multiscale losses (Pixel-wise, Style, Perceptual)
+                multi_sl, multi_pl, multi_l1 = 0.0, 0.0, 0.0
+                # Downsample images to multiple scales
+                o_scale = multiscale_downsample(original, SCALES)
+                f_scale = multiscale_downsample(fake, SCALES)
+                m_scale = multiscale_downsample(mask_hole, SCALES)
 
-                # Style and perceptual loss per batch
-                with amp.autocast(device_type='cuda', dtype=torch.float16, enabled=False):
-                    losses["style"], losses["perceptual"] = style_perceptual_loss(
-                        original, composite, style_extractor, perceptual_loss_func, criterion
-                    )
+                for ors, fs, ms in zip(o_scale, f_scale, m_scale):
+                    # Pixel-wise reconstruction loss
+                    # Weighted l1 loss: https://arxiv.org/pdf/2401.03395
+                    # Also weighted: https://arxiv.org/pdf/1801.07892
+                    # Training only the masked area may cause seam artifacts at boundary and inconsistencies
+                    multi_l1 += HOLE_LAMBDA * criterion["l1"](fs * ms, ors * ms) + \
+                                VALID_LAMBDA * criterion["l1"](fs * (1.0 - ms), ors * (1.0 - ms))
+
+                    with amp.autocast(device_type='cuda', dtype=torch.float16, enabled=False):
+                        sl, pl = style_perceptual_loss(
+                            ors, fs * ms + ors * (1.0 - ms), style_extractor, perceptual_loss_func, criterion
+                        )
+
+                    multi_sl += sl
+                    multi_pl += pl
+
+                # Aggregate multiscale losses
+                losses["l1"] = multi_l1 / len(SCALES)
+                losses["style"] = multi_sl / len(SCALES)
+                losses["perceptual"] = multi_pl / len(SCALES)
 
                 # Final generator loss
                 losses["totalG"] = (ADV_LAMBDA * losses["adv"] +
@@ -479,7 +501,7 @@ def main():
             scalerG.update()
 
             # Free memory for generator step
-            del adv_local, adv_global, patches
+            del adv_local, adv_global, patches, o_scale, f_scale, m_scale
             torch.cuda.empty_cache()
 
             # Log losses
@@ -540,14 +562,33 @@ def main():
                 adv_local = -localD(patches).mean()
                 adv_loss = adv_global + adv_local
 
-                hole_loss = criterion["l1"](fake * mask_hole, original * mask_hole)
-                valid_loss = criterion["l1"](fake * (1.0 - mask_hole), original * (1.0 - mask_hole))
-                l1_loss = HOLE_LAMBDA * hole_loss + VALID_LAMBDA * valid_loss
+                # Multiscale losses (Pixel-wise, Style, Perceptual)
+                multi_vsl, multi_vpl, multi_vl1 = 0.0, 0.0, 0.0
+                # Downsample images to multiple scales
+                o_vscale = multiscale_downsample(original, SCALES)
+                f_vscale = multiscale_downsample(fake, SCALES)
+                m_vscale = multiscale_downsample(mask_hole, SCALES)
 
-                # Style and perceptual loss calculation per batch
-                style_l, perceptual_l = style_perceptual_loss(
-                    original, composite, style_extractor, perceptual_loss_func, criterion
-                )
+                for ors, fs, ms in zip(o_vscale, f_vscale, m_vscale):
+                    # Pixel-wise reconstruction loss
+                    # Weighted l1 loss: https://arxiv.org/pdf/2401.03395
+                    # Also weighted: https://arxiv.org/pdf/1801.07892
+                    # Training only the masked area may cause seam artifacts at boundary and inconsistencies
+                    multi_vl1 += HOLE_LAMBDA * criterion["l1"](fs * ms, ors * ms) + \
+                                 VALID_LAMBDA * criterion["l1"](fs * (1.0 - ms), ors * (1.0 - ms))
+
+                    with amp.autocast(device_type='cuda', dtype=torch.float16, enabled=False):
+                        vsl, vpl = style_perceptual_loss(
+                            ors, fs * ms + ors * (1.0 - ms), style_extractor, perceptual_loss_func, criterion
+                        )
+
+                    multi_vsl += vsl
+                    multi_vpl += vpl
+
+                # Aggregate multiscale losses
+                l1_loss = multi_vl1 / len(SCALES)
+                style_l = multi_vsl / len(SCALES)
+                perceptual_l = multi_vpl / len(SCALES)
 
                 # Final generator loss
                 totalG_val_loss = (adv_loss +
