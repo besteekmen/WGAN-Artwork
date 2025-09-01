@@ -19,7 +19,8 @@ import torchvision.utils as vutils
 from datetime import datetime
 from tqdm import tqdm
 from multiprocessing import freeze_support
-from torch.cuda.amp import autocast, GradScaler
+#from torch.cuda.amp import autocast, GradScaler
+from torch import amp
 
 # Import metrics to evaluate
 from torchmetrics.image.ssim import StructuralSimilarityIndexMeasure
@@ -60,7 +61,8 @@ def gradient_penalty(critic, real, fake, device):
     )[0]
 
     gradients = gradients.view(B, -1)
-    return ((gradients.norm(2, dim=1) - 1) ** 2).mean()
+    grad_norm = gradients.norm(2, dim=1) + 1e-8 # stabilizer added to avoid nan g loss TODO:check!
+    return ((grad_norm - 1) ** 2).mean()
 
 def gram_matrix(features: torch.Tensor) -> torch.Tensor:
     """Calculate Gram matrix for style loss.
@@ -171,14 +173,14 @@ def style_perceptual_loss(original, composite, style_extractor, perceptual_loss_
     original, composite: [B, 3, H, W] values in [-1, 1]"""
 
     # Compute VGG features in mixed precision for less GPU load
-    with autocast():
-        # Style loss
-        real_features = style_extractor(original)
-        fake_features = style_extractor(composite)
-        style = style_loss(real_features, fake_features, criterion)
+    #with amp.autocast(device_type='cuda', dtype=torch.float16): # removed temporarily due to nan G loss
+    # Style loss
+    real_features = style_extractor(original)
+    fake_features = style_extractor(composite)
+    style = style_loss(real_features, fake_features, criterion)
 
-        # Perceptual loss
-        perceptual = perceptual_loss_func(original, composite)
+    # Perceptual loss
+    perceptual = perceptual_loss_func(original, composite)
 
     return style, perceptual
 
@@ -301,9 +303,9 @@ def main():
     perceptual_loss_func = VGG16PerceptualLoss().to(device)
 
     # Grad scaler defined for faster training and lower memory usage
-    #scalerG = GradScaler()
-    #scaler_globalD = GradScaler()
-    #scaler_localD = GradScaler()
+    scalerG = amp.GradScaler()
+    scaler_globalD = amp.GradScaler()
+    scaler_localD = amp.GradScaler()
     # They will scale losses for mixed precision
 
     # Datasets and loaders
@@ -379,32 +381,36 @@ def main():
             losses = {}
 
             # Step 1: Train discriminators as critics (WGAN-GP)
-            globalD.zero_grad()
-            localD.zero_grad()
+            #globalD.zero_grad() # changed for Scaler:
+            optimizer_globalD.zero_grad()
+            #localD.zero_grad()
+            optimizer_localD.zero_grad()
 
             # Scaler: with autocast(): (add for the following 4 lines up to gap)
-            # Generate the full fake image (coarse + fine)
-            fake = netG(original, mask_hole)
-            # composite: keep known regions from original, fill holes with fake
-            composite = fake * mask_hole + original * (1.0 - mask_hole)
+            with amp.autocast(device_type='cuda', dtype=torch.float16):
+                # Generate the full fake image (coarse + fine)
+                fake = netG(original, mask_hole)
+                # composite: keep known regions from original, fill holes with fake
+                composite = fake * mask_hole + original * (1.0 - mask_hole)
 
             # Create detached versions to avoid multiple forwarding of generator
             fake_detached = fake.detach()
             composite_detached = fake_detached * mask_hole + original * (1.0 - mask_hole)
 
             # Scaler: with autocast(): (add for the following lines up to gap loss backward)
-            # Update globalD for global critic
-            # backward and optimizer steps are called separately to not mix!
-            real_global = globalD(original)
-            fake_global = globalD(composite_detached)
-            gp_global = gradient_penalty(globalD, original, composite_detached, device)
-            loss_globalD = (fake_global.mean() - real_global.mean()) + GP_LAMBDA * gp_global
-            loss_globalD.backward()
-            optimizer_globalD.step()
+            with amp.autocast(device_type='cuda', dtype=torch.float16):
+                # Update globalD for global critic
+                # backward and optimizer steps are called separately to not mix!
+                real_global = globalD(original)
+                fake_global = globalD(composite_detached)
+                gp_global = gradient_penalty(globalD, original, composite_detached, device)
+                loss_globalD = (fake_global.mean() - real_global.mean()) + GP_LAMBDA * gp_global
+            #loss_globalD.backward()
+            #optimizer_globalD.step()
             # Scaler: add below lines instead of above backward and step
-            # scaler_globalD.scale(loss_globalD).backward()
-            # scaler_globalD.step(optimizer_globalD)
-            # scaler_globalD.update()
+            scaler_globalD.scale(loss_globalD).backward()
+            scaler_globalD.step(optimizer_globalD)
+            scaler_globalD.update()
             losses["globalD"] = loss_globalD.detach()
 
             # Update localD for local critic
@@ -412,56 +418,69 @@ def main():
             real_patches = crop_local_patch(original, mask_hole)
             fake_patches = crop_local_patch(composite_detached, mask_hole)
             # Scaler: with autocast(): (add for the following lines up to gap loss backward)
-            real_local = localD(real_patches)
-            fake_local = localD(fake_patches)
-            gp_local = gradient_penalty(localD, real_patches, fake_patches, device)
-            loss_localD = (fake_local.mean() - real_local.mean()) + GP_LAMBDA * gp_local
-            loss_localD.backward()
-            optimizer_localD.step()
+            with amp.autocast(device_type='cuda', dtype=torch.float16):
+                real_local = localD(real_patches)
+                fake_local = localD(fake_patches)
+                gp_local = gradient_penalty(localD, real_patches, fake_patches, device)
+                loss_localD = (fake_local.mean() - real_local.mean()) + GP_LAMBDA * gp_local
+            #loss_localD.backward()
+            #optimizer_localD.step()
             # Scaler: add below lines instead of above backward and step
-            # scaler_localD.scale(loss_localD).backward()
-            # scaler_localD.step(optimizer_localD)
-            # scaler_localD.update()
+            scaler_localD.scale(loss_localD).backward()
+            scaler_localD.step(optimizer_localD)
+            scaler_localD.update()
             losses["localD"] = loss_localD.detach()
 
             # Final discriminator loss
             losses["totalD"] = (losses["globalD"] + losses["localD"]).detach()
 
+            # Free memory for discriminator step
+            del fake_detached, composite_detached, real_global, fake_global, gp_global
+            del real_patches, fake_patches, real_local, fake_local, gp_local
+            torch.cuda.empty_cache()
+
             # Step 2: Train generator
-            netG.zero_grad()
+            #netG.zero_grad() # Scaler:
+            optimizer_netG.zero_grad()
+
             # Scaler: with autocast(): (add for the following lines up to gap loss backward)
+            with amp.autocast(device_type='cuda', dtype=torch.float16):
+                # Adversarial (negated critic scores)
+                adv_global = -globalD(composite).mean()
+                patches = crop_local_patch(composite, mask_hole)
+                adv_local = -localD(patches).mean()
+                losses["adv"] = adv_global + adv_local
 
-            # Adversarial (negated critic scores)
-            adv_global = -globalD(composite).mean()
-            patches = crop_local_patch(composite, mask_hole)
-            adv_local = -localD(patches).mean()
-            losses["adv"] = adv_global + adv_local
+                # Pixel-wise reconstruction loss
+                # Weighted l1 loss: https://arxiv.org/pdf/2401.03395
+                # Also weighted: https://arxiv.org/pdf/1801.07892
+                # Training only the masked area may cause seam artifacts at boundary and inconsistencies
+                losses["hole"] = criterion["l1"](fake * mask_hole, original * mask_hole)
+                losses["valid"] = criterion["l1"](fake * (1.0 - mask_hole), original * (1.0 - mask_hole))
+                losses["l1"] = HOLE_LAMBDA * losses["hole"] + VALID_LAMBDA * losses["valid"]
 
-            # Pixel-wise reconstruction loss
-            # Weighted l1 loss: https://arxiv.org/pdf/2401.03395
-            # Also weighted: https://arxiv.org/pdf/1801.07892
-            # Training only the masked area may cause seam artifacts at boundary and inconsistencies
-            losses["hole"] = criterion["l1"](fake * mask_hole, original * mask_hole)
-            losses["valid"] = criterion["l1"](fake * (1.0 - mask_hole), original * (1.0 - mask_hole))
-            losses["l1"] = HOLE_LAMBDA * losses["hole"] + VALID_LAMBDA * losses["valid"]
+                # Style and perceptual loss per batch
+                with amp.autocast(device_type='cuda', dtype=torch.float16, enabled=False):
+                    losses["style"], losses["perceptual"] = style_perceptual_loss(
+                        original, composite, style_extractor, perceptual_loss_func, criterion
+                    )
 
-            # Style and perceptual loss per batch
-            losses["style"], losses["perceptual"] = style_perceptual_loss(
-                original, composite, style_extractor, perceptual_loss_func, criterion
-            )
-
-            # Final generator loss
-            losses["totalG"] = (ADV_LAMBDA * losses["adv"] +
-                                L1_LAMBDA * losses["l1"] +
-                                STYLE_LAMBDA * losses["style"] +
-                                PERCEPTUAL_LAMBDA * losses["perceptual"])
+                # Final generator loss
+                losses["totalG"] = (ADV_LAMBDA * losses["adv"] +
+                                    L1_LAMBDA * losses["l1"] +
+                                    STYLE_LAMBDA * losses["style"] +
+                                    PERCEPTUAL_LAMBDA * losses["perceptual"])
             # Loss backwards and optimizer step
-            losses["totalG"].backward()
-            optimizer_netG.step()
+            #losses["totalG"].backward()
+            #optimizer_netG.step()
             # Scaler: add below lines instead of above backward and step
-            # scaler_G.scale(losses["totalG"]).backward()
-            # scaler_G.step(optimizer_netG)
-            # scaler_G.update()
+            scalerG.scale(losses["totalG"]).backward()
+            scalerG.step(optimizer_netG)
+            scalerG.update()
+
+            # Free memory for generator step
+            del adv_local, adv_global, patches
+            torch.cuda.empty_cache()
 
             # Log losses
             losses_log["totalG"].append(losses["totalG"].item())
@@ -482,13 +501,14 @@ def main():
                 with torch.no_grad():
                     vis_fake = fake # or fake.detach().clone()?
                     vis_comp = composite # clone can be used if the tensor is manipulated later
+                    # concatenate images horizontally per sample: cat along width axis (dim=3)
                     grid = torch.cat(
                         [to_unit(original), to_unit(masked), to_unit(vis_comp)],
-                        1) # horizontal stack per sample
+                        3) # horizontal stack per sample using width dimension
                     vutils.save_image(grid,
                                       os.path.join(OUT_PATH, f'comparison_epoch({epoch})_batch({i}).png'),
                                       normalize=True,
-                                      nrow=1) # 1 row per sample (not BATCH_SIZE)
+                                      nrow=1) # 1 row per sample (not BATCH_SIZE)?
             global_step += 1
 
         # Compute and store average losses for the current epoch
@@ -549,7 +569,7 @@ def main():
         # Save fixed samples to track progress on same inputs
         with torch.no_grad():
             fixed_fake = netG(fixed_original, fixed_mask_hole).detach()
-            fixed_comp = fixed_fake * fixed_mask_hole + fixed_original * (1.0 - fixed_mask_hole).detach()
+            fixed_comp = (fixed_fake * fixed_mask_hole + fixed_original * (1.0 - fixed_mask_hole)).detach()
 
             unit_original = to_unit(fixed_original)
             unit_comp = to_unit(fixed_comp)

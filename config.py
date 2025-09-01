@@ -17,7 +17,7 @@ EPOCH_NUM = 25
 # 1. Set a larger epoch number
 # 2. Set a small learning rate
 #lr = 2e-4 # learning rate (not used, TODO: could be a fallback)
-LR_G = 2e-4 # generator learning rate
+LR_G = 2e-4 # generator learning rate, change to 1e-4 if NaN g loss
 LR_D = 1e-4 # discriminator learning rate
 
 # --- Model hyperparameters ---
@@ -36,12 +36,13 @@ LOCAL_PATCH_SIZE = 128 # Patch size for local discriminator
 
 # --- Loss weights (similar to Contextual Attention Yu et al 2018) ---
 # TODO: do I need to change?
-HOLE_LAMBDA = 6.0 # full weight for missing region (was 1.0)
+HOLE_LAMBDA = 4.0 # full weight for missing region, reduced from 6.0 to avoid large gradients
 VALID_LAMBDA = 1.0 # smaller for known region (was 0.1)
-L1_LAMBDA = 1.0 # was 10.0
-STYLE_LAMBDA = 120.0 # was 250
+L1_LAMBDA = 1.0 # was 10.0 reconstruction loss weight
+STYLE_LAMBDA = 60.0 # was 120.0 # was 250 reduce to 10 if G NaN
 ADV_LAMBDA = 0.001 # small weight for adversarial loss (for stable training)
-PERCEPTUAL_LAMBDA = 0.05 # If textures too blurry, try 0.1
+PERCEPTUAL_LAMBDA = 0.03 # Reduced from 0.05 for smoother early training
+# If textures too blurry, try 0.1
 GP_LAMBDA = 10.0 # WGAN-GP penalty weight
 
 # --- Datasets and paths ---
@@ -54,10 +55,6 @@ CROP_SIZE = 256
 CROP_COUNT = 1 # TODO: Random crop is used to crop only 1 patch!
 NUM_WORKERS = 2 # TODO: try 4
 # LOG_FILE = os.path.join(OUT_PATH, 'log.txt')
-
-# --- Labels for fake and real images (WGAN-GP: Not used anymore!) ---
-#FAKE_LABEL = 0
-#REAL_LABEL = 1
 
 # --- CUDA usage ---
 CUDA = True # set 'False' to train on CPU
