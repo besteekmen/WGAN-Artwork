@@ -69,15 +69,17 @@ class CoarseGenerator(nn.Module):
             nn.ReLU(inplace=True),
             # 6th layer
             nn.Conv2d(G_HIDDEN * 4, G_HIDDEN * 4, 3, padding=8, dilation=8),
-            nn.ReLU(inplace=True),
+            nn.ReLU(inplace=True)
         )
         self.decoder = nn.Sequential(
             # 7th layer
-            nn.ConvTranspose2d(G_HIDDEN * 4, G_HIDDEN * 2, 4, stride=2, padding=1),
+            nn.Upsample(scale_factor=2, mode="nearest"),
+            nn.Conv2d(G_HIDDEN * 4, G_HIDDEN * 2, 3, stride=1, padding=1),
             nn.InstanceNorm2d(G_HIDDEN * 2, affine=True), # --> replaced BatchNorm2d
             nn.ReLU(inplace=True),
             # 8th layer
-            nn.ConvTranspose2d(G_HIDDEN * 2, G_HIDDEN, 4, stride=2, padding=1),
+            nn.Upsample(scale_factor=2, mode="nearest"),
+            nn.Conv2d(G_HIDDEN * 2, G_HIDDEN, 3, stride=1, padding=1),
             nn.InstanceNorm2d(G_HIDDEN, affine=True), # --> replaced BatchNorm2d
             nn.ReLU(inplace=True),
             # 9th layer
@@ -127,15 +129,34 @@ class FineGenerator(nn.Module):
             nn.ReLU(inplace=True),
             # 6th layer
             conv_block(G_HIDDEN * 4, G_HIDDEN * 4, 3, padding=8, dilation=8),
+            nn.ReLU(inplace=True)
+        )
+        self.decoder_128 = nn.Sequential( # 128x128 output
+            # 7th layer
+            nn.Upsample(scale_factor=2, mode="nearest"),
+            nn.Conv2d(G_HIDDEN * 4, G_HIDDEN * 2, 3, stride=1, padding=1),
+            nn.InstanceNorm2d(G_HIDDEN * 2, affine=True),  # --> replaced BatchNorm2d
+            nn.ReLU(inplace=True)
+        )
+        self.decoder_256 = nn.Sequential( # 256x256 output
+            # 8th layer
+            nn.Upsample(scale_factor=2, mode="nearest"),
+            nn.Conv2d(G_HIDDEN * 2, G_HIDDEN, 3, stride=1, padding=1),
+            nn.InstanceNorm2d(G_HIDDEN, affine=True),  # --> replaced BatchNorm2d
             nn.ReLU(inplace=True),
+            # 9th layer
+            nn.Conv2d(G_HIDDEN, 3, 3, padding=1),
+            nn.Tanh()
         )
         self.decoder = nn.Sequential(
             # 7th layer
-            nn.ConvTranspose2d(G_HIDDEN * 4, G_HIDDEN * 2, 4, stride=2, padding=1),
+            nn.Upsample(scale_factor=2, mode="nearest"),
+            nn.Conv2d(G_HIDDEN * 4, G_HIDDEN * 2, 3, stride=1, padding=1),
             nn.InstanceNorm2d(G_HIDDEN * 2, affine=True),  # --> replaced BatchNorm2d
             nn.ReLU(inplace=True),
             # 8th layer
-            nn.ConvTranspose2d(G_HIDDEN * 2, G_HIDDEN, 4, stride=2, padding=1),
+            nn.Upsample(scale_factor=2, mode="nearest"),
+            nn.Conv2d(G_HIDDEN * 2, G_HIDDEN, 3, stride=1, padding=1),
             nn.InstanceNorm2d(G_HIDDEN, affine=True),  # --> replaced BatchNorm2d
             nn.ReLU(inplace=True),
             # 9th layer
@@ -145,8 +166,12 @@ class FineGenerator(nn.Module):
     def forward(self, x):
         x = self.encoder(x)
         x = self.middle(x)
-        x = self.decoder(x)
-        return x
+        #x = self.decoder(x)
+
+        # Multi-scale supervision
+        out_128 = self.decoder_128(x) # coarse-to-fine mid-level
+        out_256 = self.decoder_256(out_128) # final fine output
+        return out_256, out_128
 
 # ---------------------
 # Generator Wrapper
@@ -178,9 +203,9 @@ class Generator(nn.Module):
 
         # Stage 2: Fine prediction
         fine_input = torch.cat([blended_output, mask_scaled], 1)
-        fine_output = self.fine_gen(fine_input)
+        fine_output, out_128 = self.fine_gen(fine_input)
 
-        return fine_output
+        return fine_output, out_128
 
 # Create a helper function to load Generator
 def load_generator(model_path):

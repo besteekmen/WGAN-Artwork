@@ -113,7 +113,7 @@ class VGG19StyleExtractor(nn.Module):
 class VGG16PerceptualLoss(nn.Module):
     """Perceptual loss for VGG16.
     Compare feature maps of real and generated images."""
-    def __init__(self, layers=None, resize=True):
+    def __init__(self, layers=None):
         super().__init__()
         vgg = tvmodels.vgg16(pretrained=True).features.eval()
         for param in vgg.parameters():
@@ -128,28 +128,30 @@ class VGG16PerceptualLoss(nn.Module):
             'std', torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1))
         self.criterion = nn.MSELoss() # TODO: use criterion dict later?
 
-    def forward(self, real, fake):
+    def extract_features(self, x):
+        """Extract intermediate features from input x for perceptual loss.
+        x: [B, 3, H, W] in [-1, 1]"""
+        # Rescale from [-1, 1] to [0, 1] and normalize
+        x = (x + 1.0) / 2.0
+        x = (x - self.mean) / self.std
+        features = []
+        cur = x
+        for idx, layer in enumerate(self.vgg):
+            cur = layer(cur)
+            if idx in self.layers:
+                features.append(cur)
+        return features
+
+    def forward(self, real, fake, real_features=None):
         """
         real, fake: [B, 3, H, W] values in [-1, 1]
         """
-        # Rescale from [-1, 1] to [0, 1] and normalize
-        real = (real + 1.0) / 2.0
-        fake = (fake + 1.0) / 2.0
-        # Normalize with ImageNet statistics
-        real = (real - self.mean) / self.std
-        fake = (fake - self.mean) / self.std
+        # Compute real features if not provided
+        if real_features is None:
+            real_features = self.extract_features(real)
 
-        # Pass through VGG and extract features
-        real_features = []
-        fake_features = []
-        x_real = real
-        x_fake = fake
-        for idx, layer in enumerate(self.vgg):
-            x_real = layer(x_real)
-            x_fake = layer(x_fake)
-            if idx in self.layers:
-                real_features.append(x_real)
-                fake_features.append(x_fake)
+        # Pass through VGG and extract features, compute fake features
+        fake_features = self.extract_features(fake)
 
         # Compute MSE between features
         loss = 0
@@ -167,21 +169,21 @@ def style_loss(real_features, fake_features, criterion):
         loss += criterion["mse"](gram_matrix(rf), gram_matrix(ff))
     return loss
 
-def style_perceptual_loss(original, composite, style_extractor, perceptual_loss_func, criterion):
-    """Computes style and perceptual losses per batch.
+def style_perceptual_loss(original, composite, style_extractor, perceptual_loss_func, criterion, orig_style_features=None, orig_perceptual_features=None):
+    """Computes style and perceptual losses using precomputed features.
     original, composite: [B, 3, H, W] values in [-1, 1]"""
 
     # Compute VGG features in mixed precision for less GPU load
     #with amp.autocast(device_type='cuda', dtype=torch.float16): # removed temporarily due to nan G loss
     # Style loss
-    real_features = style_extractor(original)
+    real_features = orig_style_features or style_extractor(original)
     fake_features = style_extractor(composite)
     style = style_loss(real_features, fake_features, criterion)
 
     # Perceptual loss
-    perceptual = perceptual_loss_func(original, composite)
+    perceptual = perceptual_loss_func(original, composite, real_features=orig_perceptual_features)
 
-    return style, perceptual
+    return style, perceptual, real_features, orig_perceptual_features or real_features
 
 def multiscale_downsample(img, scales=None):
     """Return a list of images downsampled to different scales."""
@@ -397,7 +399,11 @@ def main():
             # Scaler: with autocast(): (add for the following 4 lines up to gap)
             with amp.autocast(device_type='cuda', dtype=torch.float16):
                 # Generate the full fake image (coarse + fine)
-                fake = netG(original, mask_hole)
+                #fake = netG(original, mask_hole)
+
+                fake, intermediate = netG(original, mask_hole)  # fine 256x256 and intermediate 128x128
+                outs = [(intermediate, SCALE_WEIGHTS["intermediate"]), (fake, SCALE_WEIGHTS["fine"])]
+
                 # composite: keep known regions from original, fill holes with fake
                 composite = fake * mask_hole + original * (1.0 - mask_hole)
 
@@ -461,31 +467,37 @@ def main():
 
                 # Multiscale losses (Pixel-wise, Style, Perceptual)
                 multi_sl, multi_pl, multi_l1 = 0.0, 0.0, 0.0
-                # Downsample images to multiple scales
-                o_scale = multiscale_downsample(original, SCALES)
-                f_scale = multiscale_downsample(fake, SCALES)
-                m_scale = multiscale_downsample(mask_hole, SCALES)
 
-                for ors, fs, ms in zip(o_scale, f_scale, m_scale):
+                # Precompute original features once per batch
+                with amp.autocast(device_type='cuda', dtype=torch.float16, enabled=False):
+                    orig_style_features = style_extractor(original)
+                    orig_perc_features = perceptual_loss_func.extract_features(original)
+
+                for out, weight in outs:
                     # Pixel-wise reconstruction loss
                     # Weighted l1 loss: https://arxiv.org/pdf/2401.03395
                     # Also weighted: https://arxiv.org/pdf/1801.07892
                     # Training only the masked area may cause seam artifacts at boundary and inconsistencies
-                    multi_l1 += HOLE_LAMBDA * criterion["l1"](fs * ms, ors * ms) + \
-                                VALID_LAMBDA * criterion["l1"](fs * (1.0 - ms), ors * (1.0 - ms))
+                    l1_out = HOLE_LAMBDA * criterion["l1"](out * mask_hole, original * mask_hole) + \
+                             VALID_LAMBDA * criterion["l1"](out * (1.0 - mask_hole), original * (1.0 - mask_hole))
+
+                    multi_l1 += weight * l1_out
 
                     with amp.autocast(device_type='cuda', dtype=torch.float16, enabled=False):
-                        sl, pl = style_perceptual_loss(
-                            ors, fs * ms + ors * (1.0 - ms), style_extractor, perceptual_loss_func, criterion
+                        sl, pl, _, _ = style_perceptual_loss(
+                            original, out * mask_hole + original * (1.0 - mask_hole),
+                            style_extractor, perceptual_loss_func, criterion,
+                            orig_style_features=orig_style_features,
+                            orig_perceptual_features=orig_perc_features
                         )
 
-                    multi_sl += sl
-                    multi_pl += pl
+                    multi_sl += weight * sl
+                    multi_pl += weight * pl
 
                 # Aggregate multiscale losses
-                losses["l1"] = multi_l1 / len(SCALES)
-                losses["style"] = multi_sl / len(SCALES)
-                losses["perceptual"] = multi_pl / len(SCALES)
+                losses["l1"] = multi_l1
+                losses["style"] = multi_sl
+                losses["perceptual"] = multi_pl
 
                 # Final generator loss
                 losses["totalG"] = (ADV_LAMBDA * losses["adv"] +
@@ -501,7 +513,7 @@ def main():
             scalerG.update()
 
             # Free memory for generator step
-            del adv_local, adv_global, patches, o_scale, f_scale, m_scale
+            del adv_local, adv_global, patches
             torch.cuda.empty_cache()
 
             # Log losses
@@ -553,7 +565,11 @@ def main():
                 mask_known = mask_known.to(device)
                 mask_hole = (1.0 - mask_known).float().to(device)
 
-                fake = netG(original, mask_hole)
+                #fake = netG(original, mask_hole)
+                fake, intermediate = netG(original, mask_hole)  # fine 256x256 and intermediate 128x128
+                outs = [(intermediate, SCALE_WEIGHTS["intermediate"]), (fake, SCALE_WEIGHTS["fine"])]
+
+                # composite: keep known regions from original, fill holes with fake
                 composite = fake * mask_hole + original * (1.0 - mask_hole)
 
                 # Adversarial (negated critic scores)
@@ -564,31 +580,37 @@ def main():
 
                 # Multiscale losses (Pixel-wise, Style, Perceptual)
                 multi_vsl, multi_vpl, multi_vl1 = 0.0, 0.0, 0.0
-                # Downsample images to multiple scales
-                o_vscale = multiscale_downsample(original, SCALES)
-                f_vscale = multiscale_downsample(fake, SCALES)
-                m_vscale = multiscale_downsample(mask_hole, SCALES)
 
-                for ors, fs, ms in zip(o_vscale, f_vscale, m_vscale):
+                # Precompute original features once per batch
+                with amp.autocast(device_type='cuda', dtype=torch.float16, enabled=False):
+                    orig_style_features = style_extractor(original)
+                    orig_perc_features = perceptual_loss_func.extract_features(original)
+
+                for out, weight in outs:
                     # Pixel-wise reconstruction loss
                     # Weighted l1 loss: https://arxiv.org/pdf/2401.03395
                     # Also weighted: https://arxiv.org/pdf/1801.07892
                     # Training only the masked area may cause seam artifacts at boundary and inconsistencies
-                    multi_vl1 += HOLE_LAMBDA * criterion["l1"](fs * ms, ors * ms) + \
-                                 VALID_LAMBDA * criterion["l1"](fs * (1.0 - ms), ors * (1.0 - ms))
+                    vl1_out = HOLE_LAMBDA * criterion["l1"](out * mask_hole, original * mask_hole) + \
+                             VALID_LAMBDA * criterion["l1"](out * (1.0 - mask_hole), original * (1.0 - mask_hole))
+
+                    multi_vl1 += weight * vl1_out
 
                     with amp.autocast(device_type='cuda', dtype=torch.float16, enabled=False):
-                        vsl, vpl = style_perceptual_loss(
-                            ors, fs * ms + ors * (1.0 - ms), style_extractor, perceptual_loss_func, criterion
+                        vsl, vpl, _, _ = style_perceptual_loss(
+                            original, out * mask_hole + original * (1.0 - mask_hole),
+                            style_extractor, perceptual_loss_func, criterion,
+                            orig_style_features=orig_style_features,
+                            orig_perceptual_features=orig_perc_features
                         )
 
-                    multi_vsl += vsl
-                    multi_vpl += vpl
+                    multi_vsl += weight * vsl
+                    multi_vpl += weight * vpl
 
                 # Aggregate multiscale losses
-                l1_loss = multi_vl1 / len(SCALES)
-                style_l = multi_vsl / len(SCALES)
-                perceptual_l = multi_vpl / len(SCALES)
+                l1_loss = multi_vl1
+                style_l = multi_vsl
+                perceptual_l = multi_vpl
 
                 # Final generator loss
                 totalG_val_loss = (adv_loss +
@@ -609,7 +631,8 @@ def main():
 
         # Save fixed samples to track progress on same inputs
         with torch.no_grad():
-            fixed_fake = netG(fixed_original, fixed_mask_hole).detach()
+            #fixed_fake = netG(fixed_original, fixed_mask_hole).detach()
+            fixed_fake, fixed_inter = netG(fixed_original, fixed_mask_hole)  # fine 256x256 and intermediate 128x128
             fixed_comp = (fixed_fake * fixed_mask_hole + fixed_original * (1.0 - fixed_mask_hole)).detach()
 
             unit_original = to_unit(fixed_original)
