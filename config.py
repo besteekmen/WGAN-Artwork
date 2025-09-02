@@ -11,7 +11,7 @@ BATCH_SIZE = 16 # reduced from 128 to avoid OOM
 # 2. Train the model for 1 epoch
 # 3. Double the batch size until errors pop up
 # Ex: For MNIST, setting BATCH_SIZE to 128 is good enough, costs less than 1 GB of GPU memory.
-EPOCH_NUM = 30
+EPOCH_NUM = 40 # Ideally 50 to 100!
 # EPOCH_NUM has a great impact on the training time of neural networks.
 # To improve results:
 # 1. Set a larger epoch number
