@@ -185,15 +185,6 @@ def style_perceptual_loss(original, composite, style_extractor, perceptual_loss_
 
     return style, perceptual, real_features, orig_perceptual_features or real_features
 
-def multiscale_downsample(img, scales=None):
-    """Return a list of images downsampled to different scales."""
-    if scales is None:
-        scales = [1.0, 0.5, 0.25]
-    return [F.interpolate(img,
-                          scale_factor=s,
-                          mode='bilinear',
-                          align_corners=False) for s in scales]
-
 def crop_local_patch(images: torch.Tensor, masks_hole: torch.Tensor, patch_size: int = LOCAL_PATCH_SIZE) -> torch.Tensor:
     """
     images: tensor of shape [B, C, H, W],
@@ -386,6 +377,8 @@ def main():
             mask_known = mask_known.to(device)
             # convert to hole-mask (1=hole, 0=known) for generator
             mask_hole = (1.0 - mask_known).float().to(device)
+            #if mask_hole.dim() == 3: # (B, H, W) -> add channel
+            #    mask_hole.unsqueeze_(1)
 
             # Create a dictionary to keep losses
             losses = {}
@@ -402,8 +395,6 @@ def main():
                 #fake = netG(original, mask_hole)
 
                 fake, intermediate = netG(original, mask_hole)  # fine 256x256 and intermediate 128x128
-                outs = [(intermediate, SCALE_WEIGHTS["intermediate"]), (fake, SCALE_WEIGHTS["fine"])]
-
                 # composite: keep known regions from original, fill holes with fake
                 composite = fake * mask_hole + original * (1.0 - mask_hole)
 
@@ -465,39 +456,52 @@ def main():
                 adv_local = -localD(patches).mean()
                 losses["adv"] = adv_global + adv_local
 
-                # Multiscale losses (Pixel-wise, Style, Perceptual)
-                multi_sl, multi_pl, multi_l1 = 0.0, 0.0, 0.0
+                # Downsample original and mask
+                original_inter = F.interpolate(original, size=(128, 128), mode="bilinear", align_corners=False)
+                mask_inter = F.interpolate(mask_hole, size=(128, 128), mode="nearest")
 
                 # Precompute original features once per batch
                 with amp.autocast(device_type='cuda', dtype=torch.float16, enabled=False):
+                    # Final output size (256 x 256)
                     orig_style_features = style_extractor(original)
                     orig_perc_features = perceptual_loss_func.extract_features(original)
+                    # Intermediate output size (128 x 128)
+                    int_style_features = style_extractor(original_inter)
+                    int_perc_features = perceptual_loss_func.extract_features(original_inter)
 
-                for out, weight in outs:
-                    # Pixel-wise reconstruction loss
-                    # Weighted l1 loss: https://arxiv.org/pdf/2401.03395
-                    # Also weighted: https://arxiv.org/pdf/1801.07892
-                    # Training only the masked area may cause seam artifacts at boundary and inconsistencies
-                    l1_out = HOLE_LAMBDA * criterion["l1"](out * mask_hole, original * mask_hole) + \
-                             VALID_LAMBDA * criterion["l1"](out * (1.0 - mask_hole), original * (1.0 - mask_hole))
+                # Pixel-wise reconstruction loss
+                # Weighted l1 loss: https://arxiv.org/pdf/2401.03395
+                # Also weighted: https://arxiv.org/pdf/1801.07892
+                # Training only the masked area may cause seam artifacts at boundary and inconsistencies
+                # L1 loss on final output (256 x 256)
+                l1_fine = HOLE_LAMBDA * criterion["l1"](fake * mask_hole, original * mask_hole) + \
+                          VALID_LAMBDA * criterion["l1"](fake * (1.0 - mask_hole), original * (1.0 - mask_hole))
 
-                    multi_l1 += weight * l1_out
+                # L1 loss on intermediate output (128, 128)
+                l1_inter = HOLE_LAMBDA * criterion["l1"](intermediate * mask_inter, original_inter * mask_inter) + \
+                          VALID_LAMBDA * criterion["l1"](intermediate * (1.0 - mask_inter), original_inter * (1.0 - mask_inter))
 
-                    with amp.autocast(device_type='cuda', dtype=torch.float16, enabled=False):
-                        sl, pl, _, _ = style_perceptual_loss(
-                            original, out * mask_hole + original * (1.0 - mask_hole),
-                            style_extractor, perceptual_loss_func, criterion,
-                            orig_style_features=orig_style_features,
-                            orig_perceptual_features=orig_perc_features
-                        )
+                with amp.autocast(device_type='cuda', dtype=torch.float16, enabled=False):
+                    sl, pl, _, _ = style_perceptual_loss(
+                        original, fake * mask_hole + original * (1.0 - mask_hole),
+                        style_extractor, perceptual_loss_func, criterion,
+                        orig_style_features=orig_style_features,
+                        orig_perceptual_features=orig_perc_features
+                    )
 
-                    multi_sl += weight * sl
-                    multi_pl += weight * pl
+                    sli, pli, _, _ = style_perceptual_loss(
+                        original_inter, intermediate * mask_inter + original_inter * (1.0 - mask_inter),
+                        style_extractor, perceptual_loss_func, criterion,
+                        orig_style_features=int_style_features,
+                        orig_perceptual_features=int_perc_features
+                    )
 
                 # Aggregate multiscale losses
-                losses["l1"] = multi_l1
-                losses["style"] = multi_sl
-                losses["perceptual"] = multi_pl
+                losses["l1"] = SCALE_WEIGHTS["intermediate"] * l1_inter + \
+                               SCALE_WEIGHTS["fine"] * l1_fine
+                losses["style"] = sl # used only final scale
+                losses["perceptual"] = SCALE_WEIGHTS["intermediate"] * pli + \
+                                       SCALE_WEIGHTS["fine"] * pl
 
                 # Final generator loss
                 losses["totalG"] = (ADV_LAMBDA * losses["adv"] +
@@ -564,10 +568,11 @@ def main():
                 original = original.to(device)
                 mask_known = mask_known.to(device)
                 mask_hole = (1.0 - mask_known).float().to(device)
+                #if mask_hole.dim() == 3:  # (B, H, W) -> add channel
+                #    mask_hole.unsqueeze_(1)
 
                 #fake = netG(original, mask_hole)
                 fake, intermediate = netG(original, mask_hole)  # fine 256x256 and intermediate 128x128
-                outs = [(intermediate, SCALE_WEIGHTS["intermediate"]), (fake, SCALE_WEIGHTS["fine"])]
 
                 # composite: keep known regions from original, fill holes with fake
                 composite = fake * mask_hole + original * (1.0 - mask_hole)
@@ -578,39 +583,53 @@ def main():
                 adv_local = -localD(patches).mean()
                 adv_loss = adv_global + adv_local
 
-                # Multiscale losses (Pixel-wise, Style, Perceptual)
-                multi_vsl, multi_vpl, multi_vl1 = 0.0, 0.0, 0.0
+                # Downsample original and mask
+                original_inter = F.interpolate(original, size=(128, 128), mode="bilinear", align_corners=False)
+                mask_inter = F.interpolate(mask_hole, size=(128, 128), mode="nearest")
 
                 # Precompute original features once per batch
                 with amp.autocast(device_type='cuda', dtype=torch.float16, enabled=False):
+                    # Final output size (256 x 256)
                     orig_style_features = style_extractor(original)
                     orig_perc_features = perceptual_loss_func.extract_features(original)
+                    # Intermediate output size (128 x 128)
+                    int_style_features = style_extractor(original_inter)
+                    int_perc_features = perceptual_loss_func.extract_features(original_inter)
 
-                for out, weight in outs:
-                    # Pixel-wise reconstruction loss
-                    # Weighted l1 loss: https://arxiv.org/pdf/2401.03395
-                    # Also weighted: https://arxiv.org/pdf/1801.07892
-                    # Training only the masked area may cause seam artifacts at boundary and inconsistencies
-                    vl1_out = HOLE_LAMBDA * criterion["l1"](out * mask_hole, original * mask_hole) + \
-                             VALID_LAMBDA * criterion["l1"](out * (1.0 - mask_hole), original * (1.0 - mask_hole))
+                # Pixel-wise reconstruction loss
+                # Weighted l1 loss: https://arxiv.org/pdf/2401.03395
+                # Also weighted: https://arxiv.org/pdf/1801.07892
+                # Training only the masked area may cause seam artifacts at boundary and inconsistencies
+                # L1 loss on final output (256 x 256)
+                vl1_fine = HOLE_LAMBDA * criterion["l1"](fake * mask_hole, original * mask_hole) + \
+                           VALID_LAMBDA * criterion["l1"](fake * (1.0 - mask_hole), original * (1.0 - mask_hole))
 
-                    multi_vl1 += weight * vl1_out
+                # L1 loss on intermediate output (128, 128)
+                vl1_inter = HOLE_LAMBDA * criterion["l1"](intermediate * mask_inter, original_inter * mask_inter) + \
+                            VALID_LAMBDA * criterion["l1"](intermediate * (1.0 - mask_inter),
+                                                          original_inter * (1.0 - mask_inter))
 
-                    with amp.autocast(device_type='cuda', dtype=torch.float16, enabled=False):
-                        vsl, vpl, _, _ = style_perceptual_loss(
-                            original, out * mask_hole + original * (1.0 - mask_hole),
-                            style_extractor, perceptual_loss_func, criterion,
-                            orig_style_features=orig_style_features,
-                            orig_perceptual_features=orig_perc_features
-                        )
+                with amp.autocast(device_type='cuda', dtype=torch.float16, enabled=False):
+                    vsl, vpl, _, _ = style_perceptual_loss(
+                        original, fake * mask_hole + original * (1.0 - mask_hole),
+                        style_extractor, perceptual_loss_func, criterion,
+                        orig_style_features=orig_style_features,
+                        orig_perceptual_features=orig_perc_features
+                    )
 
-                    multi_vsl += weight * vsl
-                    multi_vpl += weight * vpl
+                    vsli, vpli, _, _ = style_perceptual_loss(
+                        original_inter, intermediate * mask_inter + original_inter * (1.0 - mask_inter),
+                        style_extractor, perceptual_loss_func, criterion,
+                        orig_style_features=int_style_features,
+                        orig_perceptual_features=int_perc_features
+                    )
 
                 # Aggregate multiscale losses
-                l1_loss = multi_vl1
-                style_l = multi_vsl
-                perceptual_l = multi_vpl
+                l1_loss = SCALE_WEIGHTS["intermediate"] * vl1_inter + \
+                          SCALE_WEIGHTS["fine"] * vl1_fine
+                style_l = vsl # used only final scale
+                perceptual_l = SCALE_WEIGHTS["intermediate"] * vpli + \
+                               SCALE_WEIGHTS["fine"] * vpl
 
                 # Final generator loss
                 totalG_val_loss = (adv_loss +

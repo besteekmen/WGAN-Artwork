@@ -138,6 +138,10 @@ class FineGenerator(nn.Module):
             nn.InstanceNorm2d(G_HIDDEN * 2, affine=True),  # --> replaced BatchNorm2d
             nn.ReLU(inplace=True)
         )
+        self.to_rgb_128 = nn.Sequential(
+            nn.Conv2d(G_HIDDEN * 2, 3, 3, padding=1),
+            nn.Tanh()
+        )
         self.decoder_256 = nn.Sequential( # 256x256 output
             # 8th layer
             nn.Upsample(scale_factor=2, mode="nearest"),
@@ -169,8 +173,9 @@ class FineGenerator(nn.Module):
         #x = self.decoder(x)
 
         # Multi-scale supervision
-        out_128 = self.decoder_128(x) # coarse-to-fine mid-level
-        out_256 = self.decoder_256(out_128) # final fine output
+        features_128 = self.decoder_128(x) # hidden at 128 x 128
+        out_128 = self.to_rgb_128(features_128) # intermediate with RGB
+        out_256 = self.decoder_256(features_128) # final fine output
         return out_256, out_128
 
 # ---------------------
