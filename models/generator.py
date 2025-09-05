@@ -36,6 +36,23 @@ def conv_block(in_channels, out_channels, kernel_size=3, stride=1, padding=1, di
         # Normalization added since no gates!
     return nn.Sequential(*layers)
 
+class UpsamplePixelShuffle(nn.Module):
+    """Upsamples by a factor of 2 using pixel shuffle instead of nearest neighbor."""
+    def __init__(self, in_channels, out_channels):
+        super(UpsamplePixelShuffle, self).__init__()
+
+        self.conv = conv_block(in_channels, out_channels * 4, kernel_size=3, stride=1, padding=1)
+        self.norm = nn.InstanceNorm2d(out_channels * 4, affine=True)
+        self.pixel_shuffle = nn.PixelShuffle(2)
+        self.relu = nn.LeakyReLU(0.1, inplace=True) # avoid zeroing activations
+
+    def forward(self, x):
+        x = self.conv(x)
+        x = self.norm(x) # apply normalization before pixel shuffle!
+        x = self.pixel_shuffle(x)
+        x = self.relu(x)
+        return x
+
 # ---------------------
 # Coarse Generator
 # ---------------------
@@ -63,25 +80,19 @@ class CoarseGenerator(nn.Module):
             # Dilated convolutions to expand receptive field without increasing resolution
             # 4th layer
             nn.Conv2d(G_HIDDEN * 4, G_HIDDEN * 4, 3, padding=2, dilation=2),
-            nn.ReLU(inplace=True),
+            nn.LeakyReLU(0.2, inplace=True),
             # 5th layer
             nn.Conv2d(G_HIDDEN * 4, G_HIDDEN * 4, 3, padding=4, dilation=4),
-            nn.ReLU(inplace=True),
+            nn.LeakyReLU(0.2, inplace=True),
             # 6th layer
             nn.Conv2d(G_HIDDEN * 4, G_HIDDEN * 4, 3, padding=8, dilation=8),
-            nn.ReLU(inplace=True)
+            nn.LeakyReLU(0.2, inplace=True)
         )
         self.decoder = nn.Sequential(
             # 7th layer
-            nn.Upsample(scale_factor=2, mode="nearest"),
-            nn.Conv2d(G_HIDDEN * 4, G_HIDDEN * 2, 3, stride=1, padding=1),
-            nn.InstanceNorm2d(G_HIDDEN * 2, affine=True), # --> replaced BatchNorm2d
-            nn.ReLU(inplace=True),
+            UpsamplePixelShuffle(G_HIDDEN * 4, G_HIDDEN * 2),
             # 8th layer
-            nn.Upsample(scale_factor=2, mode="nearest"),
-            nn.Conv2d(G_HIDDEN * 2, G_HIDDEN, 3, stride=1, padding=1),
-            nn.InstanceNorm2d(G_HIDDEN, affine=True), # --> replaced BatchNorm2d
-            nn.ReLU(inplace=True),
+            UpsamplePixelShuffle(G_HIDDEN * 2, G_HIDDEN),
             # 9th layer
             nn.Conv2d(G_HIDDEN,3, 3, padding=1),
             nn.Tanh()
@@ -123,20 +134,17 @@ class FineGenerator(nn.Module):
             # Dilated convolutions to expand receptive field without increasing resolution
             # 4th layer
             conv_block(G_HIDDEN * 4, G_HIDDEN * 4, 3, padding=2, dilation=2),
-            nn.ReLU(inplace=True),
+            nn.LeakyReLU(0.2, inplace=True),
             # 5th layer
             conv_block(G_HIDDEN * 4, G_HIDDEN * 4, 3, padding=4, dilation=4),
-            nn.ReLU(inplace=True),
+            nn.LeakyReLU(0.2, inplace=True),
             # 6th layer
             conv_block(G_HIDDEN * 4, G_HIDDEN * 4, 3, padding=8, dilation=8),
-            nn.ReLU(inplace=True)
+            nn.LeakyReLU(0.2, inplace=True)
         )
         self.decoder_128 = nn.Sequential( # 128x128 output
             # 7th layer
-            nn.Upsample(scale_factor=2, mode="nearest"),
-            nn.Conv2d(G_HIDDEN * 4, G_HIDDEN * 2, 3, stride=1, padding=1),
-            nn.InstanceNorm2d(G_HIDDEN * 2, affine=True),  # --> replaced BatchNorm2d
-            nn.ReLU(inplace=True)
+            UpsamplePixelShuffle(G_HIDDEN * 4, G_HIDDEN * 2)
         )
         self.to_rgb_128 = nn.Sequential(
             nn.Conv2d(G_HIDDEN * 2, 3, 3, padding=1),
@@ -144,29 +152,12 @@ class FineGenerator(nn.Module):
         )
         self.decoder_256 = nn.Sequential( # 256x256 output
             # 8th layer
-            nn.Upsample(scale_factor=2, mode="nearest"),
-            nn.Conv2d(G_HIDDEN * 2, G_HIDDEN, 3, stride=1, padding=1),
-            nn.InstanceNorm2d(G_HIDDEN, affine=True),  # --> replaced BatchNorm2d
-            nn.ReLU(inplace=True),
+            UpsamplePixelShuffle(G_HIDDEN * 2, G_HIDDEN),
             # 9th layer
             nn.Conv2d(G_HIDDEN, 3, 3, padding=1),
             nn.Tanh()
         )
-        self.decoder = nn.Sequential(
-            # 7th layer
-            nn.Upsample(scale_factor=2, mode="nearest"),
-            nn.Conv2d(G_HIDDEN * 4, G_HIDDEN * 2, 3, stride=1, padding=1),
-            nn.InstanceNorm2d(G_HIDDEN * 2, affine=True),  # --> replaced BatchNorm2d
-            nn.ReLU(inplace=True),
-            # 8th layer
-            nn.Upsample(scale_factor=2, mode="nearest"),
-            nn.Conv2d(G_HIDDEN * 2, G_HIDDEN, 3, stride=1, padding=1),
-            nn.InstanceNorm2d(G_HIDDEN, affine=True),  # --> replaced BatchNorm2d
-            nn.ReLU(inplace=True),
-            # 9th layer
-            nn.Conv2d(G_HIDDEN,3, 3, padding=1),
-            nn.Tanh()
-        )
+
     def forward(self, x):
         x = self.encoder(x)
         x = self.middle(x)
