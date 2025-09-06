@@ -111,7 +111,7 @@ def feature_loss(real_features, fake_features, mode, criterion):
     loss = 0
     for rf, ff in zip(real_features, fake_features):
         loss += compare(rf, ff)
-    return loss
+    return loss / len(real_features) # normalize by number of layers v6
 
 def gradient_penalty(critic, real, fake, device):
     B, C, H, W = real.shape
@@ -126,8 +126,8 @@ def gradient_penalty(critic, real, fake, device):
         inputs=interpolated,
         grad_outputs=torch.ones_like(critic_scores),
         create_graph=True,
-        only_inputs=True,
-        retain_graph=True
+        retain_graph=True,
+        only_inputs=True
     )[0]
 
     gradients = gradients.view(B, -1)
@@ -145,6 +145,13 @@ def get_weights(schedule, epoch):
         if epoch >= e: # check if current epoch has reached this schedule
             return w
     return schedule[0][1] # return the first weight
+
+def erode_mask(mask: torch.Tensor, k: int=3) -> torch.Tensor:
+    """Morphological erosion (1 = hole, 0 = known) by k x k kernels.
+    Shrinks the hole region, leaving a safe margin around boundaries."""
+
+    # max_pool2d on inverted mask = erosion
+    return -F.max_pool2d(mask, kernel_size=k, stride=1, padding=k//2)
 
 def crop_local_patch2(images: torch.Tensor, masks_hole: torch.Tensor, patch_size: int = LOCAL_PATCH_SIZE) -> torch.Tensor:
     """
@@ -397,7 +404,8 @@ def main():
 
             # Forward generator once per batch
             with amp.autocast(device_type='cuda', dtype=torch.float16):
-                fake, intermediate = netG(original, mask_hole)  # fine 256x256 and intermediate 128x128
+                fake = netG(original, mask_hole)
+                #fake, intermediate = netG(original, mask_hole)  # fine 256x256 and intermediate 128x128
                 # composite: keep known regions from original, fill holes with fake
                 composite = fake * mask_hole + original * (1.0 - mask_hole)
 
@@ -476,6 +484,12 @@ def main():
                 # Downsample original and mask for intermediate scale
                 original_inter = F.interpolate(original, size=(128, 128), mode="bilinear", align_corners=False)
                 mask_inter = F.interpolate(mask_known, size=(128, 128), mode="nearest")
+                fake_inter = F.interpolate(fake, size=(128, 128), mode="bilinear", align_corners=False)
+                # TODO: to switch back to multi-resolution return from generator, get fake_inter from netG
+
+                # Erode masks to ignore 1px halo at boundaries
+                eroded_mask = erode_mask(mask_hole, k=3)
+                eroded_inter = erode_mask(mask_inter, k=3)
 
                 # -------------------------------------------------
                 # Adversarial Loss (negated critic scores)
@@ -491,20 +505,21 @@ def main():
                 # Also weighted: https://arxiv.org/pdf/1801.07892
                 # Training only the masked area may cause seam artifacts at boundary and inconsistencies
                 # Fine scale: (256 x 256) on full image
-                l1_fine = hole_lambda * criterion["l1"](fake * mask_hole, original * mask_hole) + \
-                          valid_lambda * criterion["l1"](fake * (1.0 - mask_hole), original * (1.0 - mask_hole))
+                l1_fine = hole_lambda * criterion["l1"](fake * eroded_mask, original * eroded_mask) + \
+                          valid_lambda * criterion["l1"](fake * (1.0 - eroded_mask), original * (1.0 - eroded_mask))
                 # Coarse scale: (128, 128) only L1
-                l1_inter = hole_lambda * criterion["l1"](intermediate * mask_inter, original_inter * mask_inter) + \
-                          valid_lambda * criterion["l1"](intermediate * (1.0 - mask_inter), original_inter * (1.0 - mask_inter))
+                l1_inter = hole_lambda * criterion["l1"](fake_inter * eroded_inter, original_inter * eroded_inter) + \
+                          valid_lambda * criterion["l1"](fake_inter * (1.0 - eroded_inter), original_inter * (1.0 - eroded_inter))
                 losses["l1"] = inter_weight * l1_inter.float() + \
                                fine_weight * l1_fine.float()
 
             # -------------------------------------------------
             # Style loss (no autocast to avoid NaN, only fine)
             # -------------------------------------------------
-            with torch.no_grad(): # as VGG is frozen, no need to track gradients here
-                real_style = style_extractor(original)
-                fake_style = style_extractor(composite)
+            #with torch.no_grad(): # as VGG is frozen, no need to track gradients here
+            #real_style = style_extractor(original).detach()
+            real_style = [f.detach() for f in style_extractor(original)]
+            fake_style = style_extractor(composite)
                 # detach composite to break any graph if you remove no_grad!
             sl = feature_loss(real_style, fake_style, "style", criterion["mse"])
             losses["style"] = sl  # used only on final scale
@@ -589,12 +604,18 @@ def main():
                 mask_hole = (1.0 - mask_known).float().to(device)
 
                 # Generator forward w/o grad
-                fake, intermediate = netG(original, mask_hole)  # fine 256x256 and intermediate 128x128
+                fake = netG(original, mask_hole)
+                #fake, intermediate = netG(original, mask_hole)  # fine 256x256 and intermediate 128x128
                 composite = fake * mask_hole + original * (1.0 - mask_hole)
 
                 # Downsample original and mask
                 original_inter = F.interpolate(original, size=(128, 128), mode="bilinear", align_corners=False)
                 mask_inter = F.interpolate(mask_hole, size=(128, 128), mode="nearest")
+                fake_inter = F.interpolate(fake, size=(128, 128), mode="bilinear", align_corners=False)
+
+                # Erode masks to ignore 1px halo at boundaries
+                eroded_mask = erode_mask(mask_hole, k=3)
+                eroded_inter = erode_mask(mask_inter, k=3)
 
                 # -------------------------------------------------
                 # Pixel-wise L1 loss
@@ -603,13 +624,13 @@ def main():
                 # Also weighted: https://arxiv.org/pdf/1801.07892
                 # Training only the masked area may cause seam artifacts at boundary and inconsistencies
                 # L1 loss on final output (256 x 256)
-                vl1_fine = hole_lambda * criterion["l1"](fake * mask_hole, original * mask_hole) + \
-                           valid_lambda * criterion["l1"](fake * (1.0 - mask_hole),
-                                                          original * (1.0 - mask_hole))
+                vl1_fine = hole_lambda * criterion["l1"](fake * eroded_mask, original * eroded_mask) + \
+                           valid_lambda * criterion["l1"](fake * (1.0 - eroded_mask),
+                                                          original * (1.0 - eroded_mask))
                 # L1 loss on intermediate output (128, 128)
-                vl1_inter = hole_lambda * criterion["l1"](intermediate * mask_inter, original_inter * mask_inter) + \
-                            valid_lambda * criterion["l1"](intermediate * (1.0 - mask_inter),
-                                                           original_inter * (1.0 - mask_inter))
+                vl1_inter = hole_lambda * criterion["l1"](fake_inter * eroded_inter, original_inter * eroded_inter) + \
+                            valid_lambda * criterion["l1"](fake_inter * (1.0 - eroded_inter),
+                                                           original_inter * (1.0 - eroded_inter))
                 vl1_loss = inter_weight * vl1_inter.float() + \
                            fine_weight * vl1_fine.float()
 
@@ -636,7 +657,7 @@ def main():
                 val_losses.append(totalG_val_loss.item())
 
                 # Free memory for validation step
-                del fake, intermediate, composite, real_style, fake_style, real_perc, fake_perc
+                del fake, composite, real_style, fake_style, real_perc, fake_perc
                 del vpl, vsl, vl1_loss, vl1_inter, vl1_fine
                 #torch.cuda.empty_cache()
 
@@ -652,8 +673,8 @@ def main():
 
         # Save fixed samples to track progress on same inputs
         with torch.no_grad():
-            #fixed_fake = netG(fixed_original, fixed_mask_hole).detach()
-            fixed_fake, fixed_inter = netG(fixed_original, fixed_mask_hole)  # fine 256x256 and intermediate 128x128
+            fixed_fake = netG(fixed_original, fixed_mask_hole)
+            #fixed_fake, fixed_inter = netG(fixed_original, fixed_mask_hole)  # fine 256x256 and intermediate 128x128
             fixed_comp = (fixed_fake * fixed_mask_hole + fixed_original * (1.0 - fixed_mask_hole)).detach()
 
             unit_original = to_unit(fixed_original)

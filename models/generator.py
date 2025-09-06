@@ -40,20 +40,16 @@ class UpsamplePixelShuffle(nn.Module):
     """Upsamples by a factor of 2 using pixel shuffle instead of nearest neighbor."""
     def __init__(self, in_channels, out_channels):
         super(UpsamplePixelShuffle, self).__init__()
-        self.conv = conv_block(in_channels, out_channels * 4, kernel_size=3, stride=1, padding=1, is_gated=False)
-        # Optional normalization (skip or try LayerNorm if needed)
-        #self.norm = nn.InstanceNorm2d(out_channels * 4, affine=True)
+        self.conv = nn.Conv2d(in_channels, out_channels * 4, kernel_size=3, stride=1, padding=1, padding_mode='reflect')
+        # No normalization here to avoid blurring details
         self.pre_shuffle = nn.LeakyReLU(0.1, inplace=True)
         self.pixel_shuffle = nn.PixelShuffle(2)
         # A 1x1 convolution layer for channel refinement (sharpen details) (a tiny linear mixer for channels)
-        self.refine = nn.Conv2d(out_channels, out_channels, kernel_size=1, stride=1, padding=0)
+        self.refine = nn.Conv2d(out_channels, out_channels, 1)
         self.post_shuffle = nn.LeakyReLU(0.1, inplace=True)
 
     def forward(self, x):
         x = self.conv(x)
-        # removed normalization here to avoid overly blurred output
-        # may try layer norm later if unstable!
-        #x = self.norm(x) # apply normalization before pixel shuffle!
         x = self.pre_shuffle(x)
         x = self.pixel_shuffle(x)
         x = self.refine(x)
@@ -87,21 +83,25 @@ class CoarseGenerator(nn.Module):
             # Dilated convolutions to expand receptive field without increasing resolution
             # 4th layer
             nn.Conv2d(G_HIDDEN * 4, G_HIDDEN * 4, 3, padding=2, dilation=2, padding_mode='reflect'),
-            nn.LeakyReLU(0.2, inplace=True),
+            nn.ReLU(inplace=True),
             # 5th layer
             nn.Conv2d(G_HIDDEN * 4, G_HIDDEN * 4, 3, padding=4, dilation=4, padding_mode='reflect'),
-            nn.LeakyReLU(0.2, inplace=True),
+            nn.ReLU(inplace=True),
             # 6th layer
             nn.Conv2d(G_HIDDEN * 4, G_HIDDEN * 4, 3, padding=8, dilation=8, padding_mode='reflect'),
-            nn.LeakyReLU(0.2, inplace=True)
+            nn.ReLU(inplace=True)
         )
         self.decoder = nn.Sequential(
             # 7th layer
-            UpsamplePixelShuffle(G_HIDDEN * 4, G_HIDDEN * 2),
+            nn.ConvTranspose2d(G_HIDDEN * 4, G_HIDDEN * 2, 4, 2, 1),
+            nn.InstanceNorm2d(G_HIDDEN * 2, affine=True),
+            nn.ReLU(inplace=True),
             # 8th layer
-            UpsamplePixelShuffle(G_HIDDEN * 2, G_HIDDEN),
+            nn.ConvTranspose2d(G_HIDDEN * 2, G_HIDDEN, 4, 2, 1),
+            nn.InstanceNorm2d(G_HIDDEN, affine=True),
+            nn.ReLU(inplace=True),
             # 9th layer
-            nn.Conv2d(G_HIDDEN,3, 3, padding=1, padding_mode='reflect'),
+            nn.Conv2d(G_HIDDEN,3,3,1,1, padding_mode='reflect'),
             nn.Tanh()
         )
     def forward(self, x):
@@ -149,32 +149,42 @@ class FineGenerator(nn.Module):
             conv_block(G_HIDDEN * 4, G_HIDDEN * 4, 3, padding=8, dilation=8, is_gated=True),
             nn.LeakyReLU(0.2, inplace=True)
         )
+        self.decoder = nn.Sequential(
+            # 7th layer
+            UpsamplePixelShuffle(G_HIDDEN * 4, G_HIDDEN * 2),
+            # 8th layer
+            UpsamplePixelShuffle(G_HIDDEN * 2, G_HIDDEN),
+            # 9th layer
+            nn.Conv2d(G_HIDDEN, 3, 3, 1, 1, padding_mode='reflect'),
+            nn.Tanh()
+        )
         self.decoder_128 = nn.Sequential( # 128x128 output
             # 7th layer
             UpsamplePixelShuffle(G_HIDDEN * 4, G_HIDDEN * 2)
         )
         self.to_rgb_128 = nn.Sequential(
-            nn.Conv2d(G_HIDDEN * 2, 3, 3, padding=1, padding_mode='reflect'),
+            nn.Conv2d(G_HIDDEN * 2, 3, 3, 1, 1, padding_mode='reflect'),
             nn.Tanh()
         )
         self.decoder_256 = nn.Sequential( # 256x256 output
             # 8th layer
             UpsamplePixelShuffle(G_HIDDEN * 2, G_HIDDEN),
             # 9th layer
-            nn.Conv2d(G_HIDDEN, 3, 3, padding=1, padding_mode='reflect'),
+            nn.Conv2d(G_HIDDEN, 3, 3, 1, 1, padding_mode='reflect'),
             nn.Tanh()
         )
 
     def forward(self, x):
         x = self.encoder(x)
         x = self.middle(x)
-        #x = self.decoder(x)
+        x = self.decoder(x)
 
         # Multi-scale supervision
-        features_128 = self.decoder_128(x) # hidden at 128 x 128
-        out_128 = self.to_rgb_128(features_128) # intermediate with RGB
-        out_256 = self.decoder_256(features_128) # final fine output
-        return out_256, out_128
+        #features_128 = self.decoder_128(x) # hidden at 128 x 128
+        #out_128 = self.to_rgb_128(features_128) # intermediate with RGB
+        #out_256 = self.decoder_256(features_128) # final fine output
+        #return out_256, out_128
+        return x
 
 # ---------------------
 # Generator Wrapper
@@ -207,12 +217,14 @@ class Generator(nn.Module):
 
         # Stage 2: Fine prediction
         fine_input = torch.cat([blended_output, mask_scaled], 1)
-        fine_output, out_128 = self.fine_gen(fine_input)
+        #fine_output, out_128 = self.fine_gen(fine_input)
+        fine_output = self.fine_gen(fine_input)
 
         # Add masked residual guidance on the fine output too!
         fine_output = fine_output * mask_scaled + image * known_regions
 
-        return fine_output, out_128
+        #return fine_output, out_128
+        return fine_output
 
 # Create a helper function to load Generator
 def load_generator(model_path):

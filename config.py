@@ -20,8 +20,8 @@ EPOCH_NUM = 40 # Ideally 50 to 100!
 # To improve results:
 # 1. Set a larger epoch number
 # 2. Set a small learning rate
-LR_G = 2e-4 #8e-5 # generator learning rate, change to 1e-4 if NaN g loss
-LR_D = 1e-4 #4e-5 # discriminator learning rate
+LR_G = 1e-4 #8e-5 # generator learning rate, change to 1e-4 if NaN g loss
+LR_D = 5e-5 #4e-5 # discriminator learning rate
 
 # -------------------------------------------
 # Model hyperparameters
