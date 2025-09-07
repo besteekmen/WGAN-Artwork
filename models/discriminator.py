@@ -125,6 +125,8 @@ class Discriminator(nn.Module):
             top = max(0, center_y - patch_size // 2)
             right = min(left + patch_size, W)
             bottom = min(top + patch_size, H)
+            #right = min(left + patch_size // 2, W)
+            #bottom = min(top + patch_size // 2, H)
 
             if right - left < patch_size:
                 left = max(right - patch_size, 0)

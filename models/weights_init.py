@@ -1,3 +1,4 @@
+import torch
 import torch.nn as nn
 import torch.nn.init as init
 
@@ -17,3 +18,21 @@ def weights_init_normal(m):
             init.normal_(m.weight.data, 1.0, 0.02)
         if m.bias is not None:
             init.constant_(m.bias.data, 0.0)
+
+def weights_init_upsample(weight: torch.Tensor, scale: int=2):
+    """Initialize convolution weights after 'Upsample':
+    It mimics clean upsampling and avoid checkerboard at start."""
+    out_channels, in_channels, kernel_h, kernel_w = weight.shape
+    # For out_channels = 64, scale=2 --> sub = 16 so 4 groups for upsampling by 2
+    sub_channels = out_channels // (scale ** 2)
+
+    if out_channels % (scale ** 2) != 0:
+        raise ValueError(f"For upsample init, out_channels must be divisible by {scale**2}, got {out_channels}.")
+
+    weight.data.zero_()
+
+    for i in range(scale ** 2):
+        init.kaiming_normal_(
+            weight.data[i * sub_channels:(i + 1) * sub_channels, :, :, :],
+            nonlinearity='relu'
+        )

@@ -101,40 +101,31 @@ class CroppedImageDataset(Dataset):
         return all_crops
 
 def make_dataloader(dataset, set_path, batch_size, num_workers, cuda, shuffle=True):
-    """Optimized dataloader for the current hardware (RTX 4060 + i7-13620H).
-    Tiered fallback applied."""
     assert len(dataset) > 0, f"No crops found in {set_path} set!"
-
-    # Set num_workers if not provided
-    if num_workers is None:
-        num_workers = 8 if shuffle else 4 # more for training and less for validation
-
-    # Try high-performance dataloader from the set of fallbacks
-    for workers in [8, 4, 0]:
-        try:
-            dataloader = torch.utils.data.DataLoader(
-                dataset,
-                batch_size=batch_size,
-                shuffle=shuffle, # randomly shuffle dataset at each epoch
-                num_workers=workers,
-                pin_memory=cuda,
-                prefetch_factor=2 if workers > 0 else 1,
-                # load 2 batches ahead per worker to reduce GPU waiting time
-                persistent_workers=True if num_workers > 0 else False, # workers stay alive to avoid restarting overhead
-                drop_last=True if shuffle else False # ensure all batches are full-size
-            )
-            # Test load to catch issues earlier
-            _ = next(iter(dataloader))
-            print(f"Using num_workers={workers} ...")
-            return dataloader
-        except Exception as e:
-            print(f"Dataloader with num_workers={workers} failed: {e}.")
+    # Try high-performance dataloader
+    try:
+        dataloader = torch.utils.data.DataLoader(
+            dataset,
+            batch_size=batch_size,
+            shuffle=shuffle,
+            num_workers=num_workers,
+            pin_memory=cuda,
+            persistent_workers=True,
+            prefetch_factor=2
+        )
+        _ = next(iter(dataloader))  # force load to test
+    except Exception as e:
+        print("High-performance dataloader error, falling back to num_workers=0:", e)
+        dataloader = torch.utils.data.DataLoader(
+            dataset,
+            batch_size=batch_size,
+            shuffle=shuffle,
+            num_workers=0
+        )
     # Add a pin_memory=True argument when calling torch.utils.data.DataLoader()
     # on small datasets, to make sure data is stored at fixed GPU memory addresses
     # and thus increase the data loading speed during training.
-
-    # If all fails, raise an error
-    raise RuntimeError(f"Dataloader failed with all fallback options (8, 4, 0).")
+    return dataloader
 
 def preextract_fivecrops(source_dir, target_dir, crop_size=LOCAL_PATCH_SIZE):
     """
@@ -171,7 +162,7 @@ def preextract_fivecrops(source_dir, target_dir, crop_size=LOCAL_PATCH_SIZE):
                 base_name = os.path.splitext(filename)[0]
                 for i, crop in enumerate(crops):
                     save_name = f"{base_name}_crop{i}.png"
-                    save_patha = os.path.join(target_dir, save_name)
+                    save_path = os.path.join(target_dir, save_name)
                     crop.save(save_path)
 
             except Exception as e:
