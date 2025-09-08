@@ -8,15 +8,15 @@ from torch.utils.data import Dataset
 from torchvision import transforms
 from torchvision.transforms.v2 import FiveCrop, RandomCrop
 from tqdm import tqdm
-from utils import clear_folder
+from utils.utils import clear_folder
 from config import LOCAL_PATCH_SIZE
 
 class CroppedImageDataset(Dataset):
-    """
+    """Dataset of previously cropped images.
+
     A Pytorch dataset to scan pre-extracted cropped images,
     and return the original crop with a (randomly) masked version and the mask
-
-    Args:
+    Attributes:
         crops_dir (str): Directory path containing the pre-extracted crops.
         transform (callable, optional): A function/transform that takes in
         a PIL image and returns a transformed version.

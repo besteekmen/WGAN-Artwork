@@ -3,25 +3,31 @@ import os
 import shutil
 import sys
 import torch
+import torch.nn.functional as F
 
 def to_np(var):
-    """Export torch.Tensor to NumPy array.
-    """
+    """Export torch.Tensor to NumPy array."""
     return var.detach().cpu().numpy()
 
 def to_unit(tensor: torch.Tensor) -> torch.Tensor:
-    """Rescale tensor from [-1,1] to [0,1].
-    """
+    """Rescale tensor from [-1,1] to [0,1]."""
     return (tensor + 1) / 2
 
 def to_signed(tensor: torch.Tensor) -> torch.Tensor:
-    """Rescale tensor from [0,1] to [-1,1].
-    """
+    """Rescale tensor from [0,1] to [-1,1]."""
     return (tensor * 2) - 1
 
+def downsample(img, scales=None):
+    """Return a list of images downsampled to different scales."""
+    if scales is None:
+        scales = [1.0, 0.5, 0.25]
+    return [F.interpolate(img,
+                          scale_factor=s,
+                          mode='bilinear',
+                          align_corners=False) for s in scales]
+
 def create_folder(folder_path):
-    """Create a folder if it does not exist.
-    """
+    """Create a folder if it does not exist."""
     try:
         os.makedirs(folder_path)
     except OSError as _e:

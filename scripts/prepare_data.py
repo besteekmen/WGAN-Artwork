@@ -5,12 +5,11 @@ import random
 import numpy as np
 import torch
 
-from PIL import Image
 from torchvision import transforms
 from tqdm import tqdm
-from config import SOURCE_PATH, DATA_PATH, CROP_PATH, CROP_SIZE, CROP_COUNT, SAMPLE_PATH, SEED
-from utils import clear_folder
-from data_utils import preextract_fivecrops, preextract_randomcrops, CroppedImageDataset
+from config import SOURCE_PATH, DATA_PATH, CROP_PATH, SAMPLE_PATH, SEED
+from utils.utils import clear_folder
+from utils.data_utils import CroppedImageDataset
 
 # Set random seed for reproducibility
 random.seed(SEED)

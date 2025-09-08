@@ -23,19 +23,17 @@ EPOCH_NUM = 30
 # Hence make learning slower for D and faster for G (Contextual Attention GAN, Yu et al. 2018)
 LR_G = 2e-4 # generator learning rate, change to 1e-4 if NaN g loss
 LR_D = 1e-4 # discriminator learning rate
+SAVE_FREQ = 200
 
 # --- Model hyperparameters ---
 IS_GATED = True # toggle between gated and standard convolutions in the fine stage
 D_HIDDEN = 64 # base discriminator channels
 # D_HIDDEN_LOCAL = 32 (optional, if not the same, for less params)
 G_HIDDEN = 64 # base generator channels (stage)
-#Z_DIM = 100 # not used!
 
 # --- Image channels and dimensions ---
 IMAGE_CHANNELS = 3 # Num of color channels
 X_DIM = 64
-
-# --- Image channels and dimensions ---
 LOCAL_PATCH_SIZE = 128 # Patch size for local discriminator
 
 # --- Loss weights (similar to Contextual Attention Yu et al 2018) ---
