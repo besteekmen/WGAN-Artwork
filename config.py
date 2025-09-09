@@ -1,5 +1,3 @@
-import os
-
 # --- Reproducibility (set None for random seed) ---
 SEED = 42
 
@@ -23,7 +21,9 @@ EPOCH_NUM = 30
 # Hence make learning slower for D and faster for G (Contextual Attention GAN, Yu et al. 2018)
 LR_G = 2e-4 # generator learning rate, change to 1e-4 if NaN g loss
 LR_D = 1e-4 # discriminator learning rate
+OPTIM_BETAS = (0.0, 0.9)
 SAVE_FREQ = 200
+CHECKPOINT_EVERY = 1 # Frequency of model saving
 
 # --- Model hyperparameters ---
 IS_GATED = True # toggle between gated and standard convolutions in the fine stage
@@ -58,7 +58,9 @@ SAMPLE_PATH = 'img'
 CROP_SIZE = 256
 CROP_COUNT = 1 # TODO: Random crop is used to crop only 1 patch!
 NUM_WORKERS = 4 # TODO: try 4
-# LOG_FILE = os.path.join(OUT_PATH, 'log.txt')
+LOG_PATH = 'logs'
+CHECK_PATH = 'checkpoints'
+LOAD_MODEL = False
 
 # --- CUDA usage ---
 CUDA = True # set 'False' to train on CPU

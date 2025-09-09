@@ -1,7 +1,24 @@
 import torch
 import torch.nn as nn
 import torchvision.models as tvmodels
-from config import *
+from utils.utils import get_device
+from torchmetrics.image.ssim import StructuralSimilarityIndexMeasure
+from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
+from torchmetrics.image.fid import FrechetInceptionDistance
+
+def init_losses(device=get_device()):
+    """Initialize the losses for model networks."""
+    lossL1 = nn.L1Loss()
+    lossStyle = VGG19StyleLoss().to(device)
+    lossPerceptual = VGG16PerceptualLoss().to(device)
+    return lossL1, lossStyle, lossPerceptual
+
+def init_metrics(device=get_device()):
+    """Initialize the metrics for model networks."""
+    ssim = StructuralSimilarityIndexMeasure(data_range=1.0).to(device)
+    lpips = LearnedPerceptualImagePatchSimilarity(net_type='vgg').to(device)
+    fid = FrechetInceptionDistance(feature=2048, normalize=True).to(device)
+    return ssim, lpips, fid
 
 class VGG19StyleLoss(nn.Module):
     """Extract feature maps for style loss (frozen).

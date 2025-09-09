@@ -1,6 +1,15 @@
 import torch
 import torch.nn.functional as F
-from config import LOCAL_PATCH_SIZE
+from config import LOCAL_PATCH_SIZE, SCALES
+
+def downsample(img, scales=None):
+    """Return a list of images downsampled to different scales."""
+    if scales is None:
+        scales = SCALES
+    return [F.interpolate(img,
+                          scale_factor=s,
+                          mode='bilinear',
+                          align_corners=False) for s in scales]
 
 def crop_local_patch(images: torch.Tensor, masks_hole: torch.Tensor, patch_size: int = LOCAL_PATCH_SIZE) -> torch.Tensor:
     """

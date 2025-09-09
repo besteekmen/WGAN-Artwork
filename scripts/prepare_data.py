@@ -9,7 +9,7 @@ from torchvision import transforms
 from tqdm import tqdm
 from config import SOURCE_PATH, DATA_PATH, CROP_PATH, SAMPLE_PATH, SEED
 from utils.utils import clear_folder
-from utils.data_utils import CroppedImageDataset
+from dataset import CroppedImageDataset
 
 # Set random seed for reproducibility
 random.seed(SEED)

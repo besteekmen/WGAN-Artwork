@@ -1,35 +1,22 @@
 import os
-import numpy as np
 import matplotlib.pyplot as plt
 import torch
-import torch.nn as nn
 import torch.nn.parallel
 import torch.backends.cudnn as cudnn
-import torch.optim as optim
 import torch.utils.data
 import torchvision.utils as vutils
 from datetime import datetime
-
 from tqdm import tqdm
 from multiprocessing import freeze_support
 from torch import amp
 
-# Import metrics to evaluate
-from torchmetrics.image.ssim import StructuralSimilarityIndexMeasure
-from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
-from torchmetrics.image.fid import FrechetInceptionDistance
-
+# Project specific modules
 from config import *
-from losses import VGG19StyleLoss, VGG16PerceptualLoss, gradient_penalty
-from utils.utils import clear_folder, to_unit, downsample
-from utils.data_utils import CroppedImageDataset, make_dataloader
-from utils.vision_utils import crop_local_patch
-from models.generator import Generator
-from models.discriminator import GlobalDiscriminator, LocalDiscriminator
-from models.weights_init import weights_init_normal
-
-# Optional config fallbacks
-CHECKPOINT_EVERY = globals().get('CHECKPOINT_EVERY', 1) # epochs
+from losses import gradient_penalty, init_losses
+from models.model_builder import init_optimizers, init_nets, init_model, save_checkpoint, load_checkpoint
+from utils.utils import to_unit, set_seed, get_device, print_device, is_cuda, make_run_directory
+from dataset import CroppedImageDataset, make_dataloader
+from utils.vision_utils import crop_local_patch, downsample
 
 # ------------------------------------------------------------------------------
 # Training function
@@ -37,70 +24,33 @@ CHECKPOINT_EVERY = globals().get('CHECKPOINT_EVERY', 1) # epochs
 def main():
     freeze_support() # for Windows multiprocessing
 
-    #---------------------------------------------------------------------------
-    # Setup
-    # ---------------------------------------------------------------------------
-    # Todo: Setup logging
-
-    # Make sure output folder exists and clean
-    clear_folder(OUT_PATH)
+    # Create training directories
+    out_path, log_path, check_path = make_run_directory()
 
     # Setup seed for randomness (if not pre-defined)
     print(f"PyTorch version: {torch.__version__}")
-    seed_val = np.random.randint(1, 10000) if SEED is None else SEED
-    print(f"Random Seed: {seed_val}")
-    np.random.seed(seed_val)
-    torch.manual_seed(seed_val)
+    print_device()
+    set_seed(SEED)
+    device = get_device()
 
-    # Setup device (as CUDA if available)
-    print(f"CUDA Available: {torch.cuda.is_available()}")
-    cuda_available = CUDA and torch.cuda.is_available()
-    if cuda_available:
-        print(f"CUDA Version: {torch.version.cuda}")
-        torch.cuda.manual_seed(seed_val)
-    device = torch.device("cuda:0" if cuda_available else "cpu")
-    print("Device:", torch.cuda.get_device_name(0) if cuda_available else "CPU only\n")
-
-    # Setup cudnn benchmark
+    # CUDNN setups
     cudnn.benchmark = True
-    # cuDNN chooses the best set of algorithms for the model (only fixed input)
-    # If input size NOT fixed: will have to find the best at each iteration and \
-    # the GPU memory consumption increases, especially when the models are changed \
-    # during training, and both training and evaluation done in the code.
     # Set to false if strange OOM (Out of memory) issues seen
-
-    # Setup cudnn deterministic
+    # cudnn.deterministic = True
     # Set to true if exact reproducibility is needed and disable benchmark
-    #cudnn.deterministic = True
 
-    # Setup Generator network object
-    netG = Generator().to(device)
-    netG.apply(weights_init_normal)
-    netG.upsample_init() # used to avoid initial patchy results
-    # print(globalD) # DEBUG only: causes repetitive printing
+    # Initialize or load the model
+    netG, globalD, localD = init_nets()
+    optimG, optimGD, optimLD = init_optimizers(netG, globalD, localD)
+    if LOAD_MODEL:
+        checkpoint_file = os.path.join(check_path, "") # add here which checkpoint file to load
+        load_checkpoint(netG, globalD, localD, optimG, optimGD, optimLD, checkpoint_file)
+    else:
+        init_model(netG, globalD, localD, optimG, optimGD, optimLD) # w/o checkpoint!
 
-    # Setup Discriminator network objects
-    globalD = GlobalDiscriminator().to(device)
-    localD = LocalDiscriminator().to(device)
-    globalD.apply(weights_init_normal)
-    localD.apply(weights_init_normal)
-    # print(globalD) # DEBUG only: causes repetitive printing
-
-    # Setup criterion as a dict for multiple loss
-    criterion = {
-        # WGAN-GP: BCE/BCEWithLogitsLoss avoided to switch to the WGAN-GP
-        "l1": nn.L1Loss(), # L1 loss function
-        "mse": nn.MSELoss() # MSE loss function
-    }
-
-    # Setup optimizers
-    optimizer_netG = optim.Adam(netG.parameters(), lr=LR_G, betas=(0.0, 0.9))
-    optimizer_globalD = optim.Adam(globalD.parameters(), lr=LR_D, betas=(0.0, 0.9))
-    optimizer_localD = optim.Adam(localD.parameters(), lr=LR_D, betas=(0.0, 0.9))
-
-    # VGG style and perceptual loss
-    style_loss_func = VGG19StyleLoss().to(device)
-    perceptual_loss_func = VGG16PerceptualLoss().to(device)
+    # Setup losses and quality metrics
+    lossL1, lossStyle, lossPerceptual = init_losses()
+    ssim, lpips, fid = init_losses()
 
     # Setup gradient scaler
     # Scales losses for mixed precision, hence fast training and low memory usage
@@ -114,13 +64,8 @@ def main():
     # To use a different transform, create here and pass as a parameter
     train_set = CroppedImageDataset(crops_dir=os.path.join(DATA_PATH, 'train'), split='train')
     val_set = CroppedImageDataset(crops_dir=os.path.join(DATA_PATH, 'val'), split='val')
-    train_loader = make_dataloader(train_set, 'train', BATCH_SIZE, NUM_WORKERS, cuda=cuda_available)
-    val_loader = make_dataloader(val_set, 'val', BATCH_SIZE, NUM_WORKERS, cuda=cuda_available)
-
-    # Setup quality metrics
-    ssim = StructuralSimilarityIndexMeasure(data_range=1.0).to(device)
-    lpips = LearnedPerceptualImagePatchSimilarity(net_type='vgg').to(device)
-    fid = FrechetInceptionDistance(feature=2048, normalize=True).to(device)
+    train_loader = make_dataloader(train_set, 'train', BATCH_SIZE, NUM_WORKERS, cuda=is_cuda())
+    val_loader = make_dataloader(val_set, 'val', BATCH_SIZE, NUM_WORKERS, cuda=is_cuda())
 
     # Setup fixed samples for visualization
     fixed_masked = []
@@ -170,7 +115,7 @@ def main():
         if torch.cuda.is_available():
             torch.cuda.reset_peak_memory_stats()
 
-        # Add schedula initializations if necessary
+        # Add schedule initializations if necessary
 
         for i, (masked, original, mask_known) in train_tqdm:
             # Dataset returns batches of: masked, original, mask_known (1=known)
@@ -186,8 +131,8 @@ def main():
             # Step 1: Discriminators training as critics (WGAN-GP)
             # -------------------------------------------------------------------
             # Clear out the gradients for tracking
-            optimizer_globalD.zero_grad()
-            optimizer_localD.zero_grad()
+            optimGD.zero_grad()
+            optimLD.zero_grad()
 
             with amp.autocast(device_type='cuda', dtype=torch.float16):
                 fake = netG(original, mask_hole) # full fake image (coarse + fine)
@@ -207,7 +152,7 @@ def main():
 
             # Use scaler, DO NOT detach before backward to keep gradients flow
             scaler_globalD.scale(loss_globalD).backward()
-            scaler_globalD.step(optimizer_globalD)
+            scaler_globalD.step(optimGD)
             scaler_globalD.update()
             losses["globalD"] = loss_globalD.detach()
 
@@ -224,7 +169,7 @@ def main():
 
             # Use scaler, DO NOT detach before backward to keep gradients flow
             scaler_localD.scale(loss_localD).backward() # Scale loss
-            scaler_localD.step(optimizer_localD) # skips if unscaled is inf or NaN
+            scaler_localD.step(optimLD) # skips if unscaled is inf or NaN
             scaler_localD.update() # Updates scale for the next iteration
             losses["localD"] = loss_localD.detach()
 
@@ -239,7 +184,7 @@ def main():
             # Step 2: Generator training
             # -------------------------------------------------------------------
             # Clear out the gradients for tracking
-            optimizer_netG.zero_grad()
+            optimG.zero_grad()
 
             with amp.autocast(device_type='cuda', dtype=torch.float16):
                 # ---------------------------------------------------------------
@@ -262,8 +207,8 @@ def main():
                 f_scale = downsample(fake, SCALES)
                 m_scale = downsample(mask_hole, SCALES)
                 for ors, fs, ms in zip(o_scale, f_scale, m_scale):
-                    multi_l1 += HOLE_LAMBDA * criterion["l1"](fs * ms, ors * ms) + \
-                                VALID_LAMBDA * criterion["l1"](fs * (1.0 - ms), ors * (1.0 - ms))
+                    multi_l1 += HOLE_LAMBDA * lossL1(fs * ms, ors * ms) + \
+                                VALID_LAMBDA * lossL1(fs * (1.0 - ms), ors * (1.0 - ms))
                 losses["l1"] = multi_l1 / len(SCALES)
 
             # -------------------------------------------------------------------
@@ -271,8 +216,8 @@ def main():
             # -------------------------------------------------------------------
             with amp.autocast(device_type='cuda', dtype=torch.float16, enabled=False):
                 comp_full = (fake * mask_hole + original * (1.0 - mask_hole)).float()
-                sl = style_loss_func(original.float(), comp_full)
-                pl = perceptual_loss_func(original.float(), comp_full)
+                sl = lossStyle(original.float(), comp_full)
+                pl = lossPerceptual(original.float(), comp_full)
             losses["style"] = sl
             losses["perceptual"] = pl
 
@@ -292,9 +237,9 @@ def main():
 
             # Use scaler, DO NOT detach before backward to keep gradients flow
             scalerG.scale(losses["totalG"]).backward()
-            scalerG.unscale_(optimizer_netG) # Added due to NaN G and for stability
+            scalerG.unscale_(optimG) # Added due to NaN G and for stability
             torch.nn.utils.clip_grad_norm_(netG.parameters(), 1.0) # Clip gradients
-            scalerG.step(optimizer_netG)
+            scalerG.step(optimG)
             scalerG.update()
 
             # Free memory for generator step
@@ -324,7 +269,7 @@ def main():
                         [to_unit(original), to_unit(masked), to_unit(vis_comp)],
                         3) # horizontal stack per sample using width dimension
                     vutils.save_image(grid,
-                                      os.path.join(OUT_PATH, f'comparison_epoch({epoch})_batch({i}).png'),
+                                      os.path.join(out_path, f'comparison_epoch({epoch})_batch({i}).png'),
                                       normalize=False, # done already above with to_unit
                                       nrow=1) # 1 row per sample
             global_step += 1
@@ -378,8 +323,8 @@ def main():
                     m_vscale = downsample(mask_hole, SCALES)
 
                     for ors, fs, ms in zip(o_vscale, f_vscale, m_vscale):
-                        vl1 += HOLE_LAMBDA * criterion["l1"](fs * ms, ors * ms) + \
-                               VALID_LAMBDA * criterion["l1"](fs * (1.0 - ms), ors * (1.0 - ms))
+                        vl1 += HOLE_LAMBDA * lossL1(fs * ms, ors * ms) + \
+                               VALID_LAMBDA * lossL1(fs * (1.0 - ms), ors * (1.0 - ms))
                     l1_loss = vl1 / len(SCALES)
 
                 # ---------------------------------------------------------------
@@ -387,8 +332,8 @@ def main():
                 # ---------------------------------------------------------------
                 with amp.autocast(device_type='cuda', dtype=torch.float16, enabled=False):
                     comp_full = (fake * mask_hole + original * (1.0 - mask_hole)).float()
-                    vsl = style_loss_func(original.float(), comp_full)
-                    vpl = perceptual_loss_func(original.float(), comp_full)
+                    vsl = lossStyle(original.float(), comp_full)
+                    vpl = lossPerceptual(original.float(), comp_full)
 
                 # Final generator loss
                 totalG_val_loss = (ADV_LAMBDA * adv_loss +
@@ -408,9 +353,7 @@ def main():
         # Save models (Generator and Discriminators)
         # -----------------------------------------------------------------------
         if (epoch + 1) % CHECKPOINT_EVERY == 0:
-            torch.save(netG.state_dict(), os.path.join(OUT_PATH, f'netG_epoch{epoch+1}.pth'))
-            torch.save(globalD.state_dict(), os.path.join(OUT_PATH, f'globalD_epoch{epoch+1}.pth'))
-            torch.save(localD.state_dict(), os.path.join(OUT_PATH, f'localD_epoch{epoch+1}.pth'))
+            save_checkpoint(epoch, netG, globalD, localD, optimG, optimGD, optimLD, check_path)
 
         # -----------------------------------------------------------------------
         # Epoch logging and visualization (fixed samples)
@@ -445,7 +388,7 @@ def main():
                 0) # vertical stack per sample
             vutils.save_image(
                 grid,
-                os.path.join(OUT_PATH, f'fixed_epoch{epoch+1}.png'),
+                os.path.join(out_path, f'fixed_epoch{epoch+1}.png'),
                 normalize=False,
                 nrow=fixed_original.size(0)
             )
@@ -479,7 +422,7 @@ def main():
     plt.xlabel("Iterations")
     plt.ylabel("Loss")
     plt.legend()
-    plt.savefig(os.path.join(OUT_PATH, "loss_curve_batch.png"))
+    plt.savefig(os.path.join(out_path, "loss_curve_batch.png"))
     plt.close()
 
     # Plot per-epoch averaged loss curve (Like DCGAN)
@@ -492,7 +435,7 @@ def main():
     plt.xlabel("Epoch")
     plt.ylabel("Loss")
     plt.legend()
-    plt.savefig(os.path.join(OUT_PATH, "loss_curve_epoch.png"))
+    plt.savefig(os.path.join(out_path, "loss_curve_epoch.png"))
     plt.close()
 
 if __name__ == "__main__":

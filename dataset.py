@@ -16,7 +16,7 @@ class CroppedImageDataset(Dataset):
 
     A Pytorch dataset to scan pre-extracted cropped images,
     and return the original crop with a (randomly) masked version and the mask
-    Attributes:
+    Attributes: or args:? add returns:
         crops_dir (str): Directory path containing the pre-extracted crops.
         transform (callable, optional): A function/transform that takes in
         a PIL image and returns a transformed version.

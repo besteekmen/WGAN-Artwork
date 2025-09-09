@@ -79,7 +79,7 @@ class LocalDiscriminator(nn.Module):
         return self.main(x).view(-1, 1).squeeze(1)
 
 # ---------------------
-# Discriminator Wrapper
+# Discriminator Wrapper: REMOVE!
 # ---------------------
 class Discriminator(nn.Module):
     def __init__(self):

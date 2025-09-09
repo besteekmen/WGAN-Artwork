@@ -1,4 +1,4 @@
-from utils.data_utils import CroppedImageDataset
+from dataset import CroppedImageDataset
 # from train import *
 
 def main():

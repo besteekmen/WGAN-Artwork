@@ -3,7 +3,7 @@ import torch
 from torch.utils.data import DataLoader
 from torchvision import transforms
 from models.generator import Generator
-from utils.data_utils import CroppedImageDataset
+from dataset import CroppedImageDataset
 from utils import to_unit, to_signed
 from config import *
 
