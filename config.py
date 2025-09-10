@@ -41,6 +41,7 @@ LOCAL_PATCH_SIZE = 128 # Patch size for local discriminator
 HOLE_LAMBDA = 4.0 # full weight for missing region, reduced from 6.0 to avoid large gradients
 VALID_LAMBDA = 1.0 # smaller for known region (was 0.1)
 L1_LAMBDA = 1.0 # was 10.0 reconstruction loss weight
+EDGE_LAMBDA = 0.05 # small weight for edges
 STYLE_LAMBDA = 60.0 # was 120.0 # was 250 reduce to 10 if G NaN
 ADV_LAMBDA = 0.005 # small weight for adversarial loss (for stable training)
 PERCEPTUAL_LAMBDA = 0.1 # Reduced from 0.05 for smoother early training

@@ -73,14 +73,12 @@ class CoarseGenerator(nn.Module):
         )
         self.decoder = nn.Sequential(
             # 7th layer
-            nn.Upsample(scale_factor=2, mode='nearest'),
-            #nn.ReflectionPad2d(1), # added to avoid edge ringing
+            nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False),
             nn.Conv2d(G_HIDDEN * 4, G_HIDDEN * 2, 3, stride=1, padding=1),
             nn.InstanceNorm2d(G_HIDDEN * 2, affine=True), # --> replaced BatchNorm2d
             nn.ReLU(inplace=True),
             # 8th layer
-            nn.Upsample(scale_factor=2, mode='nearest'),
-            nn.Conv2d(G_HIDDEN * 2, G_HIDDEN, 3, stride=1, padding=1),
+            nn.ConvTranspose2d(G_HIDDEN * 2, G_HIDDEN, 4, stride=2, padding=1),
             nn.InstanceNorm2d(G_HIDDEN, affine=True),  # --> replaced BatchNorm2d
             nn.ReLU(inplace=True),
             # 9th layer (to RGB)
@@ -139,12 +137,12 @@ class FineGenerator(nn.Module):
         )
         self.decoder = nn.Sequential( # Norm removed to preserve textures
             # 7th layer
-            nn.Upsample(scale_factor=2, mode='nearest'),
+            nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False),
             nn.Conv2d(G_HIDDEN * 4, G_HIDDEN * 2, 3, stride=1, padding=1),
             nn.ReLU(inplace=True),
             # 8th layer
-            nn.Upsample(scale_factor=2, mode='nearest'),
-            nn.Conv2d(G_HIDDEN * 2, G_HIDDEN, 3, stride=1, padding=1),
+            nn.ConvTranspose2d(G_HIDDEN * 2, G_HIDDEN, 4, stride=2, padding=1),
+            nn.InstanceNorm2d(G_HIDDEN, affine=True), # keep one norm for stability
             nn.ReLU(inplace=True),
             # 9th layer (to RGB)
             nn.Conv2d(G_HIDDEN, 3, 3, padding=1),

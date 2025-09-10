@@ -12,7 +12,7 @@ from torch import amp
 
 # Project specific modules
 from config import *
-from losses import gradient_penalty, init_losses, multiscale_l1loss, init_metrics
+from losses import gradient_penalty, init_losses, lossMSL1, init_metrics, lossEdge
 from models.model_builder import init_optimizers, init_nets, init_model, save_checkpoint, load_checkpoint
 from utils.utils import to_unit, set_seed, get_device, print_device, make_run_directory, half_precision, \
     full_precision
@@ -50,7 +50,7 @@ def main():
         init_model(netG, globalD, localD, optimG, optimGD, optimLD) # w/o checkpoint!
 
     # Setup losses and quality metrics
-    lossL1, lossStyle, lossPerceptual = init_losses()
+    lossStyle, lossPerceptual = init_losses()
     ssim, lpips, fid = init_metrics()
 
     # Setup gradient scaler
@@ -195,7 +195,12 @@ def main():
                 # Weighted l1 loss: https://arxiv.org/pdf/2401.03395
                 # Also weighted: https://arxiv.org/pdf/1801.07892
                 # Training only the hole may cause seam artifacts at boundary and inconsistencies
-                losses["l1"] = multiscale_l1loss(image, fake, mask_hole, lossL1)
+                losses["l1"] = lossMSL1(image, fake, mask_hole)
+
+                # -----------------------------------------------------------
+                # Edge loss
+                # -----------------------------------------------------------
+                losses["edge"] = lossEdge(image, fake)
 
             # -------------------------------------------------------------------
             # Style & Perceptual loss (no amp to avoid NaN, only full scale)
@@ -218,6 +223,7 @@ def main():
             # Final generator loss
             losses["totalG"] = (ADV_LAMBDA * losses["adv"] +
                                 L1_LAMBDA * losses["l1"] +
+                                EDGE_LAMBDA * losses["edge"] +
                                 STYLE_LAMBDA * losses["style"] +
                                 PERCEPTUAL_LAMBDA * losses["perceptual"])
 
@@ -290,18 +296,17 @@ def main():
 
                 # Adversarial (negated critic scores)
                 with half_precision():
-                    # -----------------------------------------------------------
-                    # Adversarial loss (negated critic scores)
-                    # -----------------------------------------------------------
-                    adv_global = -globalD(composite).mean()
-                    patches = crop_local_patch(composite, mask_hole)
-                    adv_local = -localD(patches).mean()
-                    adv_loss = adv_global + adv_local
+                    # Adv loss removed, shouldn't be calculated for validation!
 
                     # -----------------------------------------------------------
                     # Pixel-wise L1 loss (multiscale, under amp)
                     # -----------------------------------------------------------
-                    l1_loss = multiscale_l1loss(image, fake, mask_hole, lossL1)
+                    l1_loss = lossMSL1(image, fake, mask_hole)
+
+                    # -----------------------------------------------------------
+                    # Edge loss
+                    # -----------------------------------------------------------
+                    l1_edge = lossEdge(image, fake)
 
                 # ---------------------------------------------------------------
                 # Style & Perceptual loss (no amp to avoid NaN, only full scale)
@@ -312,8 +317,8 @@ def main():
                     vpl = lossPerceptual(image.float(), comp_full)
 
                 # Final generator loss
-                totalG_val_loss = (ADV_LAMBDA * adv_loss +
-                                   L1_LAMBDA * l1_loss +
+                totalG_val_loss = (L1_LAMBDA * l1_loss +
+                                   EDGE_LAMBDA * l1_edge +
                                    STYLE_LAMBDA * vsl +
                                    PERCEPTUAL_LAMBDA * vpl)
                 val_losses.append(totalG_val_loss.item())

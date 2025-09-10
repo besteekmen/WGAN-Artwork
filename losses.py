@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torchvision.models as tvmodels
 
 from config import SCALES, HOLE_LAMBDA, VALID_LAMBDA
@@ -7,16 +8,13 @@ from utils.utils import get_device
 from torchmetrics.image.ssim import StructuralSimilarityIndexMeasure
 from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
 from torchmetrics.image.fid import FrechetInceptionDistance
-
 from utils.vision_utils import downsample
-
 
 def init_losses(device=get_device()):
     """Initialize the losses for model networks."""
-    lossL1 = nn.L1Loss()
     lossStyle = VGG19StyleLoss().to(device)
     lossPerceptual = VGG16PerceptualLoss().to(device)
-    return lossL1, lossStyle, lossPerceptual
+    return lossStyle, lossPerceptual
 
 def init_metrics(device=get_device()):
     """Initialize the metrics for model networks."""
@@ -161,7 +159,7 @@ def gradient_penalty(critic, real, fake, device):
     grad_norm = gradients.norm(2, dim=1) + 1e-8 # stabilizer added to avoid nan g loss TODO:check!
     return ((grad_norm - 1) ** 2).mean()
 
-def multiscale_l1loss(real, fake, mask, loss):
+def lossMSL1(real, fake, mask):
     """Calculate multiscale loss for a given loss function.
     Arguments:
         real: [B, 3, H, W] values in [-1, 1]
@@ -173,6 +171,24 @@ def multiscale_l1loss(real, fake, mask, loss):
     f_scale = downsample(fake, SCALES)
     m_scale = downsample(mask, SCALES)
     for ors, fs, ms in zip(r_scale, f_scale, m_scale):
-        multi_loss += HOLE_LAMBDA * loss(fs * ms, ors * ms) + \
-                      VALID_LAMBDA * loss(fs * (1.0 - ms), ors * (1.0 - ms))
+        multi_loss += HOLE_LAMBDA * F.l1_loss(fs * ms, ors * ms) + \
+                      VALID_LAMBDA * F.l1_loss(fs * (1.0 - ms), ors * (1.0 - ms))
     return multi_loss / len(SCALES)
+
+def sobel(x):
+    """Applies sobel edge detector to input image."""
+    x_gray = x.mean(dim=1, keepdim=True) # convert [B, 3, H, W] in [-1, 1] to grayscale
+    sobel_x = torch.tensor(
+        [[1, 0, -1], [2, 0, -2], [1, 0, -1]],
+        dtype=torch.float32,
+        device=x.device).unsqueeze(0).unsqueeze(0)
+    sobel_y = torch.tensor(
+        [[1, 2, 1], [0, 0, 0], [-1, -2, -1]],
+        dtype=torch.float32,
+        device=x.device).unsqueeze(0).unsqueeze(0)
+    grad_x = F.conv2d(x_gray, sobel_x, padding=1)
+    grad_y = F.conv2d(x_gray, sobel_y, padding=1)
+    return torch.sqrt(grad_x ** 2 + grad_y ** 2 + 1e-6) # added epsilon to avoid NaN grads
+
+def lossEdge(real, fake):
+    return F.l1_loss(sobel(real), sobel(fake)) # use functional l1, not class one
