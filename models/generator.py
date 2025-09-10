@@ -182,9 +182,12 @@ class Generator(nn.Module):
         self.fine_gen.upsample_init()
 
     def forward(self, image, mask):
-        # mask: it is 1 in the missing area and 0 in the known area
+        """Gets an image and a mask to forward.
+        Arguments:
+            image: [B, 3, H, W] values in [-1, 1]
+            mask: [B, 1, H, W] values in [0, 1], (1=hole, 0=known)
+        """
         # feed to generator only the masked input
-        #mask_scaled = to_signed(mask)
         masked_input = torch.cat([image * (1.0 - mask), mask], 1)
 
         # Stage 1: Coarse prediction

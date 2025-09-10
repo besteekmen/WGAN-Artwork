@@ -2,9 +2,11 @@ import errno
 import os
 import shutil
 import sys
+import random
 import numpy as np
 import torch
 import torch.nn.functional as F
+from torch import amp
 from config import *
 
 # ---------------------------------------------------------------------------
@@ -13,6 +15,14 @@ from config import *
 def is_cuda():
     """Check cuda based on settings and availability."""
     return CUDA and torch.cuda.is_available()
+
+def half_precision():
+    """Use autocast with half precision."""
+    return amp.autocast(device_type='cuda', dtype=torch.float16)
+
+def full_precision():
+    """Use full precision."""
+    return amp.autocast(device_type='cuda', dtype=torch.float16, enabled=False)
 
 def get_device():
     """Get the current device based on settings and availability."""
@@ -34,6 +44,7 @@ def set_seed(seed=SEED):
     """Set seed for reproducibility."""
     seed_val = np.random.randint(1, 10000) if seed is None else seed
     print(f"Random Seed: {seed_val}")
+    random.seed(seed_val)
     np.random.seed(seed_val)
     torch.manual_seed(seed_val)
     if is_cuda():

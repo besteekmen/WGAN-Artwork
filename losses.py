@@ -1,10 +1,15 @@
 import torch
 import torch.nn as nn
 import torchvision.models as tvmodels
+
+from config import SCALES, HOLE_LAMBDA, VALID_LAMBDA
 from utils.utils import get_device
 from torchmetrics.image.ssim import StructuralSimilarityIndexMeasure
 from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
 from torchmetrics.image.fid import FrechetInceptionDistance
+
+from utils.vision_utils import downsample
+
 
 def init_losses(device=get_device()):
     """Initialize the losses for model networks."""
@@ -34,6 +39,8 @@ class VGG19StyleLoss(nn.Module):
     def __init__(self, layers=None):
         super().__init__()
         vgg = tvmodels.vgg19(pretrained=True).features.eval()
+        # TODO: try below (and the one in VGG16) for offline, and weights is preferred over pretrained now by torchvision
+        #vgg = tvmodels.vgg19(weights=VGG19_Weights.IMAGENET1K_V1).features.eval()
         for param in vgg.parameters():
             param.requires_grad = False
         self.vgg = vgg
@@ -96,6 +103,7 @@ class VGG16PerceptualLoss(nn.Module):
     def __init__(self, layers=None, resize=True):
         super().__init__()
         vgg = tvmodels.vgg16(pretrained=True).features.eval()
+        #vgg = tvmodels.vgg16(weights=VGG16_Weights.IMAGENET1K_FEATURES).features.eval()
         for param in vgg.parameters():
             param.requires_grad = False
         self.vgg = vgg
@@ -136,6 +144,9 @@ def gradient_penalty(critic, real, fake, device):
     interpolated.requires_grad_(True)
 
     critic_scores = critic(interpolated)
+    # average to scalar per image for WGAN-GP stability
+    if critic_scores.dim() > 1:
+        critic_scores = critic_scores.mean(dim=1)
 
     gradients = torch.autograd.grad(
         outputs=critic_scores,
@@ -149,3 +160,19 @@ def gradient_penalty(critic, real, fake, device):
     gradients = gradients.view(B, -1)
     grad_norm = gradients.norm(2, dim=1) + 1e-8 # stabilizer added to avoid nan g loss TODO:check!
     return ((grad_norm - 1) ** 2).mean()
+
+def multiscale_l1loss(real, fake, mask, loss):
+    """Calculate multiscale loss for a given loss function.
+    Arguments:
+        real: [B, 3, H, W] values in [-1, 1]
+        fake: [B, 3, H, W] values in [-1, 1]
+        mask: [B, 1, H, W] values in [0, 1], (1=hole, 0=known)
+    """
+    multi_loss = 0
+    r_scale = downsample(real, SCALES)
+    f_scale = downsample(fake, SCALES)
+    m_scale = downsample(mask, SCALES)
+    for ors, fs, ms in zip(r_scale, f_scale, m_scale):
+        multi_loss += HOLE_LAMBDA * loss(fs * ms, ors * ms) + \
+                      VALID_LAMBDA * loss(fs * (1.0 - ms), ors * (1.0 - ms))
+    return multi_loss / len(SCALES)

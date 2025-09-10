@@ -31,14 +31,13 @@ class GlobalDiscriminator(nn.Module):
             nn.LeakyReLU(0.2, inplace=True),
 
             # Output layer
-            nn.Conv2d(D_HIDDEN * 8, 1, kernel_size=4, stride=1, padding=0, bias=False), # 13x13 -> 1x1 output
+            nn.Conv2d(D_HIDDEN * 8, 1, kernel_size=4, stride=1, padding=0, bias=False), # 13x13
             # WGAN-GP: removed sigmoid as not using BCE, also normalizations are removed
             # nn.Sigmoid()
         )
     def forward(self, x):
-        # Output shape: [batch_size, 1, 1, 1] -> flatten to [batch_size]
-        #return self.main(x).view(-1) # same bu make sure the dimensions are controlled!
-        return self.main(x).view(-1, 1).squeeze(1)
+        # view(-1) and view(-1, 1).squeeze(1) are the same, but make sure the dimensions are controlled!
+        return self.main(x).mean(dim=(2,3)).view(-1, 1).squeeze(1) # [B, 1, 13, 13] -> [B] with averaged
 
 # ---------------------
 # Local Discriminator: judges the inpainted mask patch (i.e. 128x128 or smaller)
@@ -70,70 +69,12 @@ class LocalDiscriminator(nn.Module):
             nn.LeakyReLU(0.2, inplace=True),
 
             # Output layer
-            nn.Conv2d(D_HIDDEN * 8, 1, kernel_size=4, stride=1, padding=0, bias=False), # 1x1 output
+            nn.Conv2d(D_HIDDEN * 8, 1, kernel_size=4, stride=1, padding=0, bias=False), # 5x5 (for patch_size=128)
             # WGAN-GP: removed sigmoid as not using BCE, also BN layers are removed
             #nn.Sigmoid()
         )
     def forward(self, x):
-        # return self.main(x).view(-1) # same bu make sure the dimensions are controlled!
-        return self.main(x).view(-1, 1).squeeze(1)
-
-# ---------------------
-# Discriminator Wrapper: REMOVE!
-# ---------------------
-class Discriminator(nn.Module):
-    def __init__(self):
-        super(Discriminator, self).__init__()
-        self.global_discriminator = GlobalDiscriminator()
-        self.local_discriminator = LocalDiscriminator()
-
-    def forward(self, full_image, mask):
-        """
-        Args:
-            full_image (torch.Tensor): shape [B, C, H, W] (inpainted or real)
-            mask (torch.Tensor): shape [B, 1, H, W] (binary mask with 1 for masked area)
-        Returns:
-            global_out: shape [B]
-            local_out: shape [B]
-        """
-        global_out = self.global_discriminator(full_image)
-        local_patches = self.extract_local_patches(full_image, mask)
-        local_out = self.local_discriminator(local_patches)
-        return global_out, local_out
-
-    @staticmethod
-    def extract_local_patches(full_image, mask, patch_size=LOCAL_PATCH_SIZE):
-        """Crop masked area for local discriminator"""
-        B, C, H, W = full_image.size()
-        patches = []
-
-        for b in range(B):
-            mask_b = mask[b, 0]
-            ys, xs = mask_b.nonzero(as_tuple=True)
-
-            if len(xs) == 0 or len(ys) == 0:
-                # No mask, center crop
-                center_x, center_y = W // 2, H // 2
-
-            else:
-                min_x, min_y = xs.min(), ys.min()
-                max_x, max_y = xs.max(), ys.max()
-                center_x = (min_x + max_x) // 2
-                center_y = (min_y + max_y) // 2
-
-            left = max(0, center_x - patch_size // 2)
-            top = max(0, center_y - patch_size // 2)
-            right = min(left + patch_size, W)
-            bottom = min(top + patch_size, H)
-            #right = min(left + patch_size // 2, W)
-            #bottom = min(top + patch_size // 2, H)
-
-            if right - left < patch_size:
-                left = max(right - patch_size, 0)
-            if bottom - top < patch_size:
-                top = max(bottom - patch_size, 0)
-
-            patch = full_image[b:b+1, :, top:bottom, left:right]
-            patches.append(patch)
-
-        return torch.cat(patches, dim=0)
+        # keep patch-level output (PatchGAN) pix2pix
+        #return self.main(x).view(-1, 1).squeeze(1)
+        out = self.main(x) # [B, 1, 5, 5]
+        return out.view(out.size(0), -1) # [B, num_patches]

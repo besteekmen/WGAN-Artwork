@@ -8,8 +8,9 @@ from torch.utils.data import Dataset
 from torchvision import transforms
 from torchvision.transforms.v2 import FiveCrop, RandomCrop
 from tqdm import tqdm
-from utils.utils import clear_folder
-from config import LOCAL_PATCH_SIZE
+from utils.utils import clear_folder, is_cuda, get_device
+from config import LOCAL_PATCH_SIZE, DATA_PATH, BATCH_SIZE, NUM_WORKERS
+
 
 class CroppedImageDataset(Dataset):
     """Dataset of previously cropped images.
@@ -64,13 +65,12 @@ class CroppedImageDataset(Dataset):
                 left = random.randint(0, width - block_size)
 
             mask = torch.ones(1, height, width, dtype=torch.float32) # [1, H, W]
-            mask[:, top:top + block_size, left:left + block_size] = 0
+            mask[:, top:top + block_size, left:left + block_size] = 0 # (1 = known, 0 = hole)
             # due to automatic broadcast, below works despite the channel mismatch
-            masked_crop = crop * mask
+            #masked_crop = crop * mask # removed redundant masked_crop return
 
-            # mask here is human-friendly version, need to be converted for generator
-            # masked_crop: [-1,1], crop: [-1,1], mask: [0,1]
-            return masked_crop, crop, mask
+            # crop: [-1,1], mask: [0,1], mask need to be converted for generator later?
+            return crop, mask
 
         except Exception as e:
             print(f"Error loading ({crop_path}): {e}.")
@@ -126,6 +126,14 @@ def make_dataloader(dataset, set_path, batch_size, num_workers, cuda, shuffle=Tr
     # on small datasets, to make sure data is stored at fixed GPU memory addresses
     # and thus increase the data loading speed during training.
     return dataloader
+
+def prepare_dataset(data_path=DATA_PATH, batch_size=BATCH_SIZE, num_workers=NUM_WORKERS):
+    """Prepare datasets through dataloaders."""
+    train_set = CroppedImageDataset(crops_dir=os.path.join(DATA_PATH, 'train'), split='train')
+    val_set = CroppedImageDataset(crops_dir=os.path.join(DATA_PATH, 'val'), split='val')
+    train_loader = make_dataloader(train_set, 'train', BATCH_SIZE, NUM_WORKERS, cuda=is_cuda())
+    val_loader = make_dataloader(val_set, 'val', BATCH_SIZE, NUM_WORKERS, cuda=is_cuda())
+    return train_loader, val_loader
 
 def preextract_fivecrops(source_dir, target_dir, crop_size=LOCAL_PATCH_SIZE):
     """
