@@ -22,6 +22,9 @@ def weights_init_normal(m):
 def weights_init_upsample(weight: torch.Tensor, scale: int=2):
     """Initialize convolution weights after 'Upsample':
     It mimics clean upsampling and avoid checkerboard at start."""
+    if weight.dim() != 4:
+        return # skip if not Conv2d weight
+
     out_channels, in_channels, kernel_h, kernel_w = weight.shape
     # For out_channels = 64, scale=2 --> sub = 16 so 4 groups for upsampling by 2
     sub_channels = out_channels // (scale ** 2)
@@ -30,7 +33,6 @@ def weights_init_upsample(weight: torch.Tensor, scale: int=2):
         raise ValueError(f"For upsample init, out_channels must be divisible by {scale**2}, got {out_channels}.")
 
     weight.data.zero_()
-
     for i in range(scale ** 2):
         init.kaiming_normal_(
             weight.data[i * sub_channels:(i + 1) * sub_channels, :, :, :],

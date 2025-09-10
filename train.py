@@ -1,4 +1,6 @@
 import os
+import sys
+import logging
 import matplotlib.pyplot as plt
 import torch
 import torch.nn.parallel
@@ -25,8 +27,17 @@ from utils.vision_utils import crop_local_patch
 def main():
     freeze_support() # for Windows multiprocessing
 
-    # Create training directories
+    # Create training directories and logger
     out_path, log_path, check_path = make_run_directory()
+    logger = logging.getLogger("train_logger")
+    logger.setLevel(logging.INFO)
+    log_file = os.path.join(log_path, "train.log")
+    fh = logging.FileHandler(log_file, mode="a", encoding="utf-8")
+    fh.setLevel(logging.INFO)
+    formatter = logging.Formatter("%(asctime)s - %(message)s", datefmt="%Y/%m/%d %H:%M:%S")
+    fh.setFormatter(formatter)
+    logger.addHandler(fh)
+    logger.info(f"Logging to: {log_file}")
 
     # Setup seed for randomness (if not pre-defined)
     print(f"PyTorch version: {torch.__version__}")
@@ -103,7 +114,7 @@ def main():
             enumerate(train_loader),
             total=len(train_loader),
             desc=f"Epoch {epoch + 1} / {EPOCH_NUM}", # Start epoch with 1
-            leave=True,
+            leave=False,
             ncols=100
         )
 
@@ -280,6 +291,15 @@ def main():
         elog["globalD"].append(gdmean)
         elog["localD"].append(ldmean)
 
+        logger.info(
+            f"Epoch {epoch+1}/{EPOCH_NUM} | "
+            f"G={elog['totalG'][-1]:.4f}, "
+            f"D={elog['totalD'][-1]:.4f}, "
+            f"gD={elog['globalD'][-1]:.4f}, "
+            f"lD={elog['localD'][-1]:.4f}, "
+            f"ValG={elog['totalG'][-1]:.4f}"
+        )
+
         # -----------------------------------------------------------------------
         # Validation loop
         # -----------------------------------------------------------------------
@@ -357,11 +377,13 @@ def main():
                 fid.update(unit_image, real=True)
                 fid.update(unit_comp, real=False)
                 fid_val = fid.compute().item()
-            print(f"Epoch {epoch+1}: SSIM={ssim_val:.4f} LPIPS={lpips_val:.4f}", end="")
+            message = f"Epoch {epoch+1}: SSIM={ssim_val:.4f} LPIPS={lpips_val:.4f}"
+            #print(f"Epoch {epoch+1}: SSIM={ssim_val:.4f} LPIPS={lpips_val:.4f}", end="")
             if fid_val is not None:
-                print(f", FID={fid_val:.2f}")
-            else:
-                print("")
+                message += f", FID={fid_val:.2f}"
+                #print(f", FID={fid_val:.2f}")
+            print(message)
+            logger.info(message)
 
             # Save the current batch (16) images: [image1 | image2 | image3 | ...]
             grid = torch.cat(

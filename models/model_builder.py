@@ -2,7 +2,7 @@ import os
 import torch
 from torch import optim
 from models.generator import Generator
-from models.discriminator import GlobalDiscriminator, LocalDiscriminator, Discriminator
+from models.discriminator import GlobalDiscriminator, LocalDiscriminator
 from models.weights_init import weights_init_normal
 from utils.utils import get_device
 from config import *

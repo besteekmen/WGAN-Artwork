@@ -87,9 +87,8 @@ class CoarseGenerator(nn.Module):
         )
 
     def upsample_init(self):
-        # Apply specific initialization to conv after upsample
+        # Apply specific initialization to conv after upsample, not to conv transpose
         weights_init_upsample(self.decoder[1].weight, scale=2)
-        weights_init_upsample(self.decoder[5].weight, scale=2)
 
     def forward(self, x):
         x = self.encoder(x)
@@ -150,9 +149,7 @@ class FineGenerator(nn.Module):
         )
 
     def upsample_init(self):
-        # Apply specific initialization to conv after upsample
         weights_init_upsample(self.decoder[1].weight, scale=2)
-        weights_init_upsample(self.decoder[4].weight, scale=2)
 
     def forward(self, x):
         x = self.encoder(x)
