@@ -19,7 +19,7 @@ EPOCH_NUM = 30
 # TODO: If discriminators are weak (not decreasing loss), use update ratios (WGAN-GP)
 # If discriminator gets perfect quickly, generator gradients may vanish!
 # Hence make learning slower for D and faster for G (Contextual Attention GAN, Yu et al. 2018)
-LR_G = 2e-4 # generator learning rate, change to 1e-4 if NaN g loss
+LR_G = 1e-4 # generator learning rate, change to 1e-4 if NaN g loss
 LR_D = 1e-4 # discriminator learning rate
 OPTIM_BETAS = (0.0, 0.9)
 SAVE_FREQ = 200
@@ -41,12 +41,12 @@ LOCAL_PATCH_SIZE = 128 # Patch size for local discriminator
 HOLE_LAMBDA = 4.0 # full weight for missing region, reduced from 6.0 to avoid large gradients
 VALID_LAMBDA = 1.0 # smaller for known region (was 0.1)
 L1_LAMBDA = 1.0 # was 10.0 reconstruction loss weight
-EDGE_LAMBDA = 0.05 # small weight for edges
+EDGE_LAMBDA = 0.0 # small weight for edges
 STYLE_LAMBDA = 60.0 # was 120.0 # was 250 reduce to 10 if G NaN
 ADV_LAMBDA = 0.005 # small weight for adversarial loss (for stable training)
 PERCEPTUAL_LAMBDA = 0.1 # Reduced from 0.05 for smoother early training
 # If textures too blurry, try 0.1
-GP_LAMBDA = 10.0 # WGAN-GP penalty weight
+GP_LAMBDA = 20.0 # WGAN-GP penalty weight
 SCALES = [1.0, 0.5, 0.25] # multiscale factors
 SCALE_WEIGHTS = [1.0, 0.5, 0.25] # multiscale factor weights
 

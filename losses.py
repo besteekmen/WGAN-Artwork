@@ -156,7 +156,7 @@ def gradient_penalty(critic, real, fake, device):
     )[0]
 
     gradients = gradients.view(B, -1)
-    grad_norm = gradients.norm(2, dim=1) + 1e-8 # stabilizer added to avoid nan g loss TODO:check!
+    grad_norm = torch.clamp(gradients.norm(2, dim=1), 0, 10) + 1e-8 # stabilizer added to avoid nan g loss TODO:check!
     return ((grad_norm - 1) ** 2).mean()
 
 def lossMSL1(real, fake, mask):

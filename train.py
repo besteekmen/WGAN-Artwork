@@ -32,11 +32,12 @@ def main():
     logger = logging.getLogger("train_logger")
     logger.setLevel(logging.INFO)
     log_file = os.path.join(log_path, "train.log")
-    fh = logging.FileHandler(log_file, mode="a", encoding="utf-8")
-    fh.setLevel(logging.INFO)
-    formatter = logging.Formatter("%(asctime)s - %(message)s", datefmt="%Y/%m/%d %H:%M:%S")
-    fh.setFormatter(formatter)
-    logger.addHandler(fh)
+    if not logger.handlers:
+        fh = logging.FileHandler(log_file, mode="a", encoding="utf-8")
+        fh.setLevel(logging.INFO)
+        formatter = logging.Formatter("%(asctime)s - %(message)s", datefmt="%Y/%m/%d %H:%M:%S")
+        fh.setFormatter(formatter)
+        logger.addHandler(fh)
     logger.info(f"Logging to: {log_file}")
 
     # Setup seed for randomness (if not pre-defined)
@@ -104,7 +105,7 @@ def main():
     # ---------------------------------------------------------------------------
     # Training loop
     # ---------------------------------------------------------------------------
-    print("Starting training...")
+    logger.info("Starting training...")
     global_step = 0
     start_time = datetime.now()
 
@@ -117,6 +118,8 @@ def main():
             leave=False,
             ncols=100
         )
+
+        nan_log_i = -999999
 
         if torch.cuda.is_available():
             torch.cuda.reset_peak_memory_stats()
@@ -141,7 +144,9 @@ def main():
 
             with half_precision():
                 fake = netG(image, mask_hole) # full fake image (coarse + fine)
+                fake = torch.clamp(fake, -1.0, 1.0)
                 composite = fake * mask_hole + image * mask # blend with known
+                composite = torch.clamp(composite, -1.0, 1.0)
 
             # Create detached versions to avoid multiple forwarding of generator
             fake_detached = fake.detach()
@@ -157,6 +162,8 @@ def main():
 
             # Use scaler, DO NOT detach before backward to keep gradients flow
             scaler_globalD.scale(loss_globalD).backward()
+            scaler_globalD.unscale_(optimGD)  # Added due to NaN G and for stability
+            torch.nn.utils.clip_grad_norm_(globalD.parameters(), 1.0)  # Clip gradients
             scaler_globalD.step(optimGD)
             scaler_globalD.update()
             losses["globalD"] = loss_globalD.detach()
@@ -174,6 +181,8 @@ def main():
 
             # Use scaler, DO NOT detach before backward to keep gradients flow
             scaler_localD.scale(loss_localD).backward() # Scale loss
+            scaler_localD.unscale_(optimLD)  # Added due to NaN G and for stability
+            torch.nn.utils.clip_grad_norm_(localD.parameters(), 1.0)  # Clip gradients
             scaler_localD.step(optimLD) # skips if unscaled is inf or NaN
             scaler_localD.update() # Updates scale for the next iteration
             losses["localD"] = loss_localD.detach()
@@ -217,26 +226,52 @@ def main():
             # Style & Perceptual loss (no amp to avoid NaN, only full scale)
             # -------------------------------------------------------------------
             with full_precision():
-                comp_full = (fake * mask_hole + image * mask).float()
-                sl = lossStyle(image.float(), comp_full)
-                pl = lossPerceptual(image.float(), comp_full)
+                comp_full = torch.clamp(fake * mask_hole + image * mask, -1.0, 1.0).float()
+                orig_clamp = torch.clamp(image, -1.0, 1.0).float()
+                sl = lossStyle(orig_clamp, comp_full)
+                pl = lossPerceptual(orig_clamp, comp_full)
             losses["style"] = sl
+            style_scale = min(1.0, (epoch + 1) / 5.0)  # warm up from 0.2 to 1.0 over 5 epochs
             losses["perceptual"] = pl
 
             # DEBUG only: Check for loss values to find the cause of NaN
-            if not all(torch.isfinite(x) for x in [losses["adv"], losses["l1"], sl, pl]):
-                print(f"[DEBUG][epoch {epoch}] iter {i}"
-                      f"adv={float(losses['adv'])}"
-                      f"l1={float(losses['l1'])}"
-                      f"style={float(losses['style'])}"
-                      f"perceptual={float(losses['perceptual'])}")
+            all_terms = [losses["adv"], losses["l1"], losses["edge"], sl, pl]
+            with_nan = (not torch.isfinite(fake).all()) or (not all(torch.isfinite(x) for x in all_terms))
+
+            if with_nan:
+                if i - nan_log_i >= 100:
+                    message_skip = (f"[SKIP][epoch {epoch + 1}] iter {i} | "
+                                    f"adv={float(losses['adv']) if torch.isfinite(losses['adv']) else 'NaN'} "
+                                    f"l1={float(losses['l1']) if torch.isfinite(losses['l1']) else 'NaN'} "
+                                    f"edge={float(losses['edge']) if torch.isfinite(losses['edge']) else 'NaN'} "
+                                    f"style={float(losses['style']) if torch.isfinite(losses['style']) else 'NaN'} "
+                                    f"perceptual={float(losses['perceptual']) if torch.isfinite(losses['perceptual']) else 'NaN'}")
+                    train_tqdm.write(message_skip)
+                    logger.info(message_skip)
+                    nan_log_i = i
+                optimG.zero_grad(set_to_none=True)
+                optimGD.zero_grad(set_to_none=True)
+                optimLD.zero_grad(set_to_none=True)
+                continue
 
             # Final generator loss
             losses["totalG"] = (ADV_LAMBDA * losses["adv"] +
                                 L1_LAMBDA * losses["l1"] +
                                 EDGE_LAMBDA * losses["edge"] +
-                                STYLE_LAMBDA * losses["style"] +
+                                STYLE_LAMBDA * style_scale * losses["style"] +
                                 PERCEPTUAL_LAMBDA * losses["perceptual"])
+
+            if i % SAVE_FREQ == 0:
+                raw = {k: float(losses[k]) for k in ["adv", "l1", "edge", "style", "perceptual"]}
+                weighted = {
+                    "adv_w": ADV_LAMBDA * raw["adv"],
+                    "l1_w": L1_LAMBDA * raw["l1"],
+                    "edge_w": EDGE_LAMBDA * raw["edge"],
+                    "style_w": STYLE_LAMBDA * raw["style"],
+                    "perceptual_w": PERCEPTUAL_LAMBDA * raw["perceptual"]
+                }
+                #train_tqdm.write(f"[Debug] Raw: {raw} | Weighted: {weighted}")
+                logger.info(f"[Debug] Raw: {raw} | Weighted: {weighted}")
 
             # Use scaler, DO NOT detach before backward to keep gradients flow
             scalerG.scale(losses["totalG"]).backward()
@@ -291,15 +326,6 @@ def main():
         elog["globalD"].append(gdmean)
         elog["localD"].append(ldmean)
 
-        logger.info(
-            f"Epoch {epoch+1}/{EPOCH_NUM} | "
-            f"G={elog['totalG'][-1]:.4f}, "
-            f"D={elog['totalD'][-1]:.4f}, "
-            f"gD={elog['globalD'][-1]:.4f}, "
-            f"lD={elog['localD'][-1]:.4f}, "
-            f"ValG={elog['totalG'][-1]:.4f}"
-        )
-
         # -----------------------------------------------------------------------
         # Validation loop
         # -----------------------------------------------------------------------
@@ -312,7 +338,9 @@ def main():
 
                 # Generator forward w/o grad
                 fake = netG(image, mask_hole)
+                fake = torch.clamp(fake, -1.0, 1.0)
                 composite = fake * mask_hole + image * mask
+                composite = torch.clamp(composite, -1.0, 1.0)
 
                 # Adversarial (negated critic scores)
                 with half_precision():
@@ -332,9 +360,10 @@ def main():
                 # Style & Perceptual loss (no amp to avoid NaN, only full scale)
                 # ---------------------------------------------------------------
                 with full_precision():
-                    comp_full = (fake * mask_hole + image * mask).float()
-                    vsl = lossStyle(image.float(), comp_full)
-                    vpl = lossPerceptual(image.float(), comp_full)
+                    comp_full = torch.clamp(fake * mask_hole + image * mask, -1.0, 1.0).float()
+                    orig_clamp = torch.clamp(image, -1.0, 1.0).float()
+                    vsl = lossStyle(orig_clamp, comp_full)
+                    vpl = lossPerceptual(orig_clamp, comp_full)
 
                 # Final generator loss
                 totalG_val_loss = (L1_LAMBDA * l1_loss +
@@ -350,6 +379,15 @@ def main():
         elog["valG"].append(avg_valG)
         print(f"Validation Epoch: {epoch+1}: G={avg_valG:.4f}")
 
+        logger.info(
+            f"Epoch {epoch+1}/{EPOCH_NUM} | "
+            f"G={elog['totalG'][-1]:.4f}, "
+            f"D={elog['totalD'][-1]:.4f}, "
+            f"gD={elog['globalD'][-1]:.4f}, "
+            f"lD={elog['localD'][-1]:.4f}, "
+            f"ValG={elog['valG'][-1]:.4f}"
+        )
+
         # -----------------------------------------------------------------------
         # Save models (Generator and Discriminators)
         # -----------------------------------------------------------------------
@@ -361,7 +399,9 @@ def main():
         # -------------------------------------------- ---------------------------
         with torch.no_grad():
             fixed_fake = netG(fixed_image, fixed_mask_hole).detach()
+            fixed_fake = torch.clamp(fixed_fake, -1.0, 1.0)
             fixed_comp = (fixed_fake * fixed_mask_hole + fixed_image * (1.0 - fixed_mask_hole)).detach()
+            fixed_comp = torch.clamp(fixed_comp, -1.0, 1.0)
 
             # Convert images to [0,1] for RGB and visualization
             unit_image = to_unit(fixed_image)
