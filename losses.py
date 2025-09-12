@@ -66,7 +66,7 @@ class VGG19StyleLoss(nn.Module):
         """
         real, fake: [B, 3, H, W] values in [-1, 1]
         """
-        real = (real + 1.0) / 2.0
+        real = (real + 1.0) / 2.0 # try using to_unit here!
         fake = (fake + 1.0) / 2.0
         real = (real - self.mean) / self.std
         fake = (fake - self.mean) / self.std
@@ -136,6 +136,8 @@ class VGG16PerceptualLoss(nn.Module):
         return loss
 
 def gradient_penalty(critic, real, fake, device):
+    """Return gradient penalty for a given gradient
+    Src: https://medium.com/@krushnakr9/gans-wasserstein-gan-with-gradient-penalty-wgan-gp-b8da816cb2d2"""
     B, C, H, W = real.shape
     alpha = torch.rand(B, 1, 1, 1, device=device)
     interpolated = alpha * real + ((1 - alpha) * fake)
@@ -151,12 +153,12 @@ def gradient_penalty(critic, real, fake, device):
         inputs=interpolated,
         grad_outputs=torch.ones_like(critic_scores),
         create_graph=True,
-        only_inputs=True,
-        retain_graph=True
+        only_inputs=True
+        #retain_graph=True # removed since it was not necessary
     )[0]
 
     gradients = gradients.view(B, -1)
-    grad_norm = torch.clamp(gradients.norm(2, dim=1), 0, 10) + 1e-8 # stabilizer added to avoid nan g loss TODO:check!
+    grad_norm = torch.clamp(gradients.norm(2, dim=1), 0, 10) + 1e-8 # stabilizer and clamp added to avoid NaN g loss
     return ((grad_norm - 1) ** 2).mean()
 
 def lossMSL1(real, fake, mask):

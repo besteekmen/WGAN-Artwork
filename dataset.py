@@ -15,6 +15,8 @@ from config import LOCAL_PATCH_SIZE, DATA_PATH, BATCH_SIZE, NUM_WORKERS
 class CroppedImageDataset(Dataset):
     """Dataset of previously cropped images.
 
+    Data is obtained from: https://github.com/cs-chan/ArtGAN/tree/master/WikiArt%20Dataset
+
     A Pytorch dataset to scan pre-extracted cropped images,
     and return the original crop with a (randomly) masked version and the mask
     Attributes: or args:? add returns:

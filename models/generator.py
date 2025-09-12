@@ -182,7 +182,7 @@ class Generator(nn.Module):
             image: [B, 3, H, W] values in [-1, 1]
             mask: [B, 1, H, W] values in [0, 1], (1=hole, 0=known)
         """
-        # feed to generator only the masked input
+        # feed the masked input concatenated with the mask
         masked_input = torch.cat([image * (1.0 - mask), mask], 1)
 
         # Stage 1: Coarse prediction
