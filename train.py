@@ -18,7 +18,7 @@ from losses import gradient_penalty, init_losses, lossMSL1, init_metrics, lossEd
 from models.model_builder import init_optimizers, init_nets, init_model, save_checkpoint, load_checkpoint
 from utils.utils import to_unit, set_seed, get_device, print_device, make_run_directory, half_precision, \
     full_precision
-from dataset import prepare_dataset
+from dataset import prepare_dataset, randomize_masks
 from utils.vision_utils import crop_local_patch
 
 # ------------------------------------------------------------------------------
@@ -79,7 +79,9 @@ def main():
     fixed_image = []
     fixed_mask_hole = []
     for i in range(min(BATCH_SIZE, len(train_loader.dataset))):
-        img, mask = train_loader.dataset[i]
+        img, mask = train_loader.dataset[i] # mask: [2, H, W] (1=known, 0=hole)
+        shape = torch.randint(0, 2, (1,), device=mask.device).item()
+        mask = mask[shape].unsqueeze(0) # mask: [1, H, W]
         fixed_masked.append((img * mask).unsqueeze(0)) # create the masked sample
         fixed_image.append(img.unsqueeze(0)) # ground truth
         fixed_mask_hole.append((1.0 - mask).unsqueeze(0)) # hole mask (1=hole, 0=known)
@@ -108,6 +110,8 @@ def main():
     logger.info("Starting training...")
     global_step = 0
     start_time = datetime.now()
+    tolerance = 5
+    best_fid = float("inf")
 
     for epoch in range(EPOCH_NUM):
         # print(torch.cuda.memory_allocated()) # DEBUG only: check GPU memory
@@ -123,13 +127,13 @@ def main():
 
         if torch.cuda.is_available():
             torch.cuda.reset_peak_memory_stats()
-
         # Add schedule initializations if necessary
 
         for i, (image, mask) in train_tqdm:
             # Dataset returns batches of: image, mask (1=known, 0=hole)
             image = image.to(device, non_blocking=True) # ground truth
-            mask = mask.to(device, non_blocking=True) # mask (1=known, 0=hole)
+            mask = mask.to(device, non_blocking=True) # masks, [B, 2, H, W] (1=known, 0=hole)
+            mask = randomize_masks(mask)
             mask_hole = (1.0 - mask).float() # (1=hole, 0=known)
 
             # Create a dictionary to keep batch losses
@@ -221,6 +225,7 @@ def main():
                 # Edge loss
                 # -----------------------------------------------------------
                 losses["edge"] = lossEdge(image, fake)
+                edge_scale = min(1.0, (0.95 ** (epoch - 20)))
 
             # -------------------------------------------------------------------
             # Style & Perceptual loss (no amp to avoid NaN, only full scale)
@@ -257,7 +262,7 @@ def main():
             # Final generator loss
             losses["totalG"] = (ADV_LAMBDA * losses["adv"] +
                                 L1_LAMBDA * losses["l1"] +
-                                EDGE_LAMBDA * losses["edge"] +
+                                EDGE_LAMBDA * edge_scale * losses["edge"] +
                                 STYLE_LAMBDA * style_scale * losses["style"] +
                                 PERCEPTUAL_LAMBDA * losses["perceptual"])
 
@@ -266,8 +271,8 @@ def main():
                 weighted = {
                     "adv_w": ADV_LAMBDA * raw["adv"],
                     "l1_w": L1_LAMBDA * raw["l1"],
-                    "edge_w": EDGE_LAMBDA * raw["edge"],
-                    "style_w": STYLE_LAMBDA * raw["style"],
+                    "edge_w": EDGE_LAMBDA * edge_scale * raw["edge"],
+                    "style_w": STYLE_LAMBDA * style_scale * raw["style"],
                     "perceptual_w": PERCEPTUAL_LAMBDA * raw["perceptual"]
                 }
                 #train_tqdm.write(f"[Debug] Raw: {raw} | Weighted: {weighted}")
@@ -334,7 +339,8 @@ def main():
             for image, mask in val_loader:
                 image = image.to(device)
                 mask = mask.to(device)
-                mask_hole = (1.0 - mask).float().to(device)
+                mask = randomize_masks(mask)
+                mask_hole = (1.0 - mask).float()  # (1=hole, 0=known)
 
                 # Generator forward w/o grad
                 fake = netG(image, mask_hole)
@@ -368,7 +374,7 @@ def main():
                 # Final generator loss
                 totalG_val_loss = (L1_LAMBDA * l1_loss +
                                    EDGE_LAMBDA * l1_edge +
-                                   STYLE_LAMBDA * vsl +
+                                   STYLE_LAMBDA * vsl + # No scale here as this is validation set!
                                    PERCEPTUAL_LAMBDA * vpl)
                 val_losses.append(totalG_val_loss.item())
 
@@ -417,6 +423,15 @@ def main():
                 fid.update(unit_image, real=True)
                 fid.update(unit_comp, real=False)
                 fid_val = fid.compute().item()
+
+                if fid_val < best_fid:
+                    best_fid = fid_val
+                    tolerance = 5 # reset if improved
+                else:
+                    tolerance -= 1
+                    if tolerance <= 0:
+                        print(f"FID STOP: Early stopping at epoch {epoch+1}/{EPOCH_NUM}")
+
             message = f"Epoch {epoch+1}: SSIM={ssim_val:.4f} LPIPS={lpips_val:.4f}"
             #print(f"Epoch {epoch+1}: SSIM={ssim_val:.4f} LPIPS={lpips_val:.4f}", end="")
             if fid_val is not None:
