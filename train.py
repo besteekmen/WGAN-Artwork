@@ -133,7 +133,7 @@ def main():
             # Dataset returns batches of: image, mask (1=known, 0=hole)
             image = image.to(device, non_blocking=True) # ground truth
             mask = mask.to(device, non_blocking=True) # masks, [B, 2, H, W] (1=known, 0=hole)
-            mask = randomize_masks(mask)
+            mask = randomize_masks(mask, 0.3)
             mask_hole = (1.0 - mask).float() # (1=hole, 0=known)
 
             # Create a dictionary to keep batch losses
@@ -336,10 +336,14 @@ def main():
         # -----------------------------------------------------------------------
         val_losses = []
         with torch.no_grad():
+            ssim_square, lpips_square = 0.0, 0.0
+            square_batches = 0
+
             for image, mask in val_loader:
                 image = image.to(device)
                 mask = mask.to(device)
-                mask = randomize_masks(mask)
+                #mask = randomize_masks(mask)
+                mask = mask[:, 0:1, :, :] # only use square masks for validation
                 mask_hole = (1.0 - mask).float()  # (1=hole, 0=known)
 
                 # Generator forward w/o grad
@@ -347,6 +351,13 @@ def main():
                 fake = torch.clamp(fake, -1.0, 1.0)
                 composite = fake * mask_hole + image * mask
                 composite = torch.clamp(composite, -1.0, 1.0)
+
+                # Compute square mask metrics
+                unit_image = to_unit(image)
+                unit_comp = to_unit(composite)
+                ssim_square += ssim.ssim(unit_comp, unit_image).item()
+                lpips_square += lpips.lpips(unit_comp, unit_image).item()
+                square_batches += 1
 
                 # Adversarial (negated critic scores)
                 with half_precision():
@@ -381,17 +392,23 @@ def main():
         # -----------------------------------------------------------------------
         # Validation logging
         # -----------------------------------------------------------------------
-        avg_valG = sum(val_losses) / len(val_losses)
-        elog["valG"].append(avg_valG)
-        print(f"Validation Epoch: {epoch+1}: G={avg_valG:.4f}")
+        avg_val_ssim = ssim_square / square_batches
+        avg_val_lpips = lpips_square / square_batches
+        elog["valG"].append(sum(val_losses) / len(val_losses))
 
-        logger.info(
-            f"Epoch {epoch+1}/{EPOCH_NUM} | "
+        logger.info( # Validation logs
+            f"Validation [Square-only] Epoch {epoch + 1}/{EPOCH_NUM} | "
+            f"Val G={elog['valG'][-1]:.4f}, "
+            f"Val SSIM={avg_val_ssim:.4f}, "
+            f"Val LPIPS={avg_val_lpips:.4f}"
+        )
+
+        logger.info( # Training logs
+            f"Training Epoch {epoch+1}/{EPOCH_NUM} | "
             f"G={elog['totalG'][-1]:.4f}, "
             f"D={elog['totalD'][-1]:.4f}, "
             f"gD={elog['globalD'][-1]:.4f}, "
-            f"lD={elog['localD'][-1]:.4f}, "
-            f"ValG={elog['valG'][-1]:.4f}"
+            f"lD={elog['localD'][-1]:.4f}"
         )
 
         # -----------------------------------------------------------------------

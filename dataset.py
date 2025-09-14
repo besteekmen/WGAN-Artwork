@@ -102,8 +102,8 @@ def generate_square_mask(height, width, rand=None):
     mask[:, top:top + block_size, left:left + block_size] = 0  # (1 = known, 0 = hole)
     return mask
 
-def generate_irregular_mask(height, width, brush_width=(5, 25),
-                            min_times=4, max_times=10,
+def generate_irregular_mask(height, width, brush_width=(7, 25),
+                            min_times=6, max_times=10,
                             rand=None):
     """Create a random size and random location irregular mask.
     Src: LaMa Image Inpainting WACV 2022 (https://github.com/advimman/lama)"""
@@ -122,18 +122,20 @@ def generate_irregular_mask(height, width, brush_width=(5, 25),
             cv2.line(mask, (x1, y1), (x2, y2), color=0.0, thickness=bw)
     return torch.from_numpy(mask).float().unsqueeze(0) # [1, H, W]
 
-def randomize_masks(mask):
-    """Randomly selects half by half mask forms.
+def randomize_masks(mask, irr_ratio=0.3):
+    """Randomly select mask types using the given irregular mask ratio.
     Arguments:
-        mask: a batch of masks with shape [B, 2, H, W].
+        mask: a batch of masks with shape [B, 2, H, W] of [:,0] square, [:,1] irregular.
+        irr_ratio: the ratio of irregular masks to random masks.
     Returns:
         mask: a batch of masks of randomized form with shape [B, 1, H, W].
     """
     B = mask.size(0)
-    perm = torch.randperm(B, device=mask.device)
-    form = torch.ones(B, dtype=torch.long, device=mask.device)
-    form[perm[:(B // 2)]] = 0
-    i = form.view(B, 1, 1, 1).expand(B, 1, *mask.shape[2:])
+    form = torch.zeros(B, dtype=torch.long, device=mask.device)
+    irr = round(irr_ratio * B)
+    i = torch.randperm(B, device=mask.device)[:irr]
+    form[i] = 1
+    i = form.view(B, 1, 1, 1).expand(-1, 1, *mask.shape[2:])
     return mask.gather(1, i)
 
 def make_dataloader(dataset, set_path, batch_size, num_workers, cuda, shuffle=True):
