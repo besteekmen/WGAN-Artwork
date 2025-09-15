@@ -355,8 +355,8 @@ def main():
                 # Compute square mask metrics
                 unit_image = to_unit(image)
                 unit_comp = to_unit(composite)
-                ssim_square += ssim.ssim(unit_comp, unit_image).item()
-                lpips_square += lpips.lpips(unit_comp, unit_image).item()
+                ssim_square += ssim(unit_comp, unit_image).item()
+                lpips_square += lpips(unit_comp, unit_image).item()
                 square_batches += 1
 
                 # Adversarial (negated critic scores)
