@@ -95,7 +95,12 @@ class CroppedImageDataset(Dataset):
 def generate_square_mask(height, width, rand=None):
     """Create a random size and random location square mask."""
     rand = rand or random
-    block_size = rand.randint(min(height, width) // 4, min(height, width) // 2)
+    # %60 small/medium and %40 large
+    if rand.random() < 0.6:
+        low, high = min(height, width) // 6, min(height, width) // 3
+    else:
+        low, high = min(height, width) // 3, min(height, width) // 2
+    block_size = rand.randint(low, high)
     top = rand.randint(0, height - block_size)
     left = rand.randint(0, width - block_size)
     mask = torch.ones(1, height, width, dtype=torch.float32)  # [1, H, W]

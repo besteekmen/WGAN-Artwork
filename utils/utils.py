@@ -1,6 +1,7 @@
 import errno
 import os
 import shutil
+import logging
 import sys
 import random
 import numpy as np
@@ -18,7 +19,7 @@ def is_cuda():
 
 def half_precision():
     """Use autocast with half precision."""
-    return amp.autocast(device_type='cuda', dtype=torch.float16)
+    return amp.autocast(device_type='cuda', dtype=torch.float16, enabled=is_cuda())
 
 def full_precision():
     """Use full precision."""
@@ -49,6 +50,14 @@ def set_seed(seed=SEED):
     torch.manual_seed(seed_val)
     if is_cuda():
         torch.cuda.manual_seed(seed_val)
+
+def get_schedule(epoch: int, schedule):
+    """Get the scheduled scale from the given epoch and schedule."""
+    scale = schedule[0][1]
+    for e, s in schedule:
+        if epoch >= e: scale = s
+        else: break
+    return scale
 
 def to_np(var):
     """Export torch.Tensor to NumPy array."""
@@ -93,6 +102,20 @@ def make_run_directory(out_path=OUT_PATH, log_path=LOG_PATH, check_path=CHECK_PA
     create_folder(log)
     create_folder(check)
     return out_path, log, check
+
+def set_logger(log_path, log_type="train_logger", out_file=TRAIN_LOG_FILE):
+    """Set logger for logging into log files."""
+    logger = logging.getLogger(log_type)
+    logger.setLevel(logging.INFO)
+    log_file = os.path.join(log_path, out_file)
+    if not logger.handlers:
+        fh = logging.FileHandler(log_file, mode="a", encoding="utf-8")
+        fh.setLevel(logging.INFO)
+        formatter = logging.Formatter("%(asctime)s - %(message)s", datefmt="%Y/%m/%d %H:%M:%S")
+        fh.setFormatter(formatter)
+        logger.addHandler(fh)
+    logger.info(f"Logging to: {log_file}")
+    return logger
 
 class StdOut(object):
     """Redirect all messages from stdout to the log file,

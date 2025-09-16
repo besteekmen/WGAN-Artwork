@@ -20,7 +20,7 @@ EPOCH_NUM = 50
 # If discriminator gets perfect quickly, generator gradients may vanish!
 # Hence make learning slower for D and faster for G (Contextual Attention GAN, Yu et al. 2018)
 LR_G = 1e-4 # generator learning rate, change to 1e-4 if NaN g loss
-LR_D = 1e-4 # discriminator learning rate
+LR_D = 8e-5 # discriminator learning rate, was also 1e-4, reduced for G to sharpen details
 OPTIM_BETAS = (0.0, 0.9)
 SAVE_FREQ = 200
 CHECKPOINT_EVERY = 1 # Frequency of model saving
@@ -36,13 +36,30 @@ IMAGE_CHANNELS = 3 # Num of color channels
 X_DIM = 64
 LOCAL_PATCH_SIZE = 128 # Patch size for local discriminator
 
+# --- Mask settings ---
+IRR_RATIO_SCHEDULE = [ # irregular masks ratio was constant at 0.3 before
+    (0, 0.20),
+    (20, 0.30),
+    (35, 0.50)
+]
+
 # --- Loss weights (similar to Contextual Attention Yu et al 2018) ---
 # TODO: do I need to change?
 HOLE_LAMBDA = 4.0 # full weight for missing region, reduced from 6.0 to avoid large gradients
 VALID_LAMBDA = 1.0 # smaller for known region (was 0.1)
 L1_LAMBDA = 1.0 # was 10.0 reconstruction loss weight
-EDGE_LAMBDA = 0.05 # WAS 0.0 and brought back to 0.02
-STYLE_LAMBDA = 60.0 # was 120.0 # was 250 reduce to 10 if G NaN
+EDGE_LAMBDA_SCHEDULE = [ # was constant before as EDGE_LAMBDA = 0.05
+    (0, 0.00),
+    (10, 0.015),
+    (20, 0.024),
+    (30, 0.030)
+]
+STYLE_LAMBDA_SCHEDULE = [ # was constant before as STYLE_LAMBDA = 60.0
+    (0, 18.0),
+    (10, 45.0),
+    (20, 72.0),
+    (30, 90.0)
+]
 ADV_LAMBDA = 0.005 # small weight for adversarial loss (for stable training)
 PERCEPTUAL_LAMBDA = 0.1 # Reduced from 0.05 for smoother early training
 # If textures too blurry, try 0.1
@@ -61,6 +78,7 @@ CROP_COUNT = 1 # TODO: Random crop is used to crop only 1 patch!
 NUM_WORKERS = 4 # TODO: try 4
 LOG_PATH = 'logs'
 CHECK_PATH = 'checkpoints'
+TRAIN_LOG_FILE = 'train.log'
 LOAD_MODEL = False
 
 # --- CUDA usage ---

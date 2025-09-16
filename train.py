@@ -1,6 +1,4 @@
 import os
-import sys
-import logging
 import matplotlib.pyplot as plt
 import torch
 import torch.nn.parallel
@@ -15,9 +13,9 @@ from torch import amp
 # Project specific modules
 from config import *
 from losses import gradient_penalty, init_losses, lossMSL1, init_metrics, lossEdge
-from models.model_builder import init_optimizers, init_nets, init_model, save_checkpoint, load_checkpoint
+from models.model_builder import init_optimizers, init_nets, save_checkpoint, setup_model
 from utils.utils import to_unit, set_seed, get_device, print_device, make_run_directory, half_precision, \
-    full_precision
+    full_precision, get_schedule, set_logger
 from dataset import prepare_dataset, randomize_masks
 from utils.vision_utils import crop_local_patch
 
@@ -29,16 +27,7 @@ def main():
 
     # Create training directories and logger
     out_path, log_path, check_path = make_run_directory()
-    logger = logging.getLogger("train_logger")
-    logger.setLevel(logging.INFO)
-    log_file = os.path.join(log_path, "train.log")
-    if not logger.handlers:
-        fh = logging.FileHandler(log_file, mode="a", encoding="utf-8")
-        fh.setLevel(logging.INFO)
-        formatter = logging.Formatter("%(asctime)s - %(message)s", datefmt="%Y/%m/%d %H:%M:%S")
-        fh.setFormatter(formatter)
-        logger.addHandler(fh)
-    logger.info(f"Logging to: {log_file}")
+    logger = set_logger(log_path)
 
     # Setup seed for randomness (if not pre-defined)
     print(f"PyTorch version: {torch.__version__}")
@@ -53,13 +42,11 @@ def main():
     # Set to true if exact reproducibility is needed and disable benchmark
 
     # Initialize or load the model
-    netG, globalD, localD = init_nets()
+    netG, globalD, localD = init_nets(device)
     optimG, optimGD, optimLD = init_optimizers(netG, globalD, localD)
-    if LOAD_MODEL:
-        checkpoint_file = os.path.join(check_path, "") # add here which checkpoint file to load
-        load_checkpoint(netG, globalD, localD, optimG, optimGD, optimLD, checkpoint_file)
-    else:
-        init_model(netG, globalD, localD, optimG, optimGD, optimLD) # w/o checkpoint!
+    start_epoch = setup_model(netG, globalD, localD,
+                              optimG, optimGD, optimLD, check_path, device)
+    # To load a pretrained model, add file_name as parameter to setup_model
 
     # Setup losses and quality metrics
     lossStyle, lossPerceptual = init_losses()
@@ -80,6 +67,7 @@ def main():
     fixed_mask_hole = []
     for i in range(min(BATCH_SIZE, len(train_loader.dataset))):
         img, mask = train_loader.dataset[i] # mask: [2, H, W] (1=known, 0=hole)
+        # half or less irregular? same style pics?
         shape = torch.randint(0, 2, (1,), device=mask.device).item()
         mask = mask[shape].unsqueeze(0) # mask: [1, H, W]
         fixed_masked.append((img * mask).unsqueeze(0)) # create the masked sample
@@ -112,8 +100,9 @@ def main():
     start_time = datetime.now()
     tolerance = 5
     best_fid = float("inf")
+    early_stopping = False
 
-    for epoch in range(EPOCH_NUM):
+    for epoch in range(start_epoch, EPOCH_NUM):
         # print(torch.cuda.memory_allocated()) # DEBUG only: check GPU memory
         train_tqdm = tqdm(
             enumerate(train_loader),
@@ -125,15 +114,26 @@ def main():
 
         nan_log_i = -999999
 
+        # Set lambda schedules
+        style_lambda = get_schedule(epoch, STYLE_LAMBDA_SCHEDULE)
+        edge_lambda = get_schedule(epoch, EDGE_LAMBDA_SCHEDULE)
+        irr_ratio = get_schedule(epoch, IRR_RATIO_SCHEDULE)
+
+        # Set training mode
+        netG.train(); globalD.train(); localD.train()
+
+        # Initialize loss sums
+        g_tot, d_tot, gd_tot, ld_tot = 0.0, 0.0, 0.0, 0.0
+        bn = 0
+
         if torch.cuda.is_available():
             torch.cuda.reset_peak_memory_stats()
-        # Add schedule initializations if necessary
 
         for i, (image, mask) in train_tqdm:
             # Dataset returns batches of: image, mask (1=known, 0=hole)
             image = image.to(device, non_blocking=True) # ground truth
             mask = mask.to(device, non_blocking=True) # masks, [B, 2, H, W] (1=known, 0=hole)
-            mask = randomize_masks(mask, 0.3)
+            mask = randomize_masks(mask, irr_ratio)
             mask_hole = (1.0 - mask).float() # (1=hole, 0=known)
 
             # Create a dictionary to keep batch losses
@@ -216,16 +216,12 @@ def main():
                 # ---------------------------------------------------------------
                 # Pixel-wise L1 loss (multiscale, under amp)
                 # ---------------------------------------------------------------
-                # Weighted l1 loss: https://arxiv.org/pdf/2401.03395
-                # Also weighted: https://arxiv.org/pdf/1801.07892
-                # Training only the hole may cause seam artifacts at boundary and inconsistencies
                 losses["l1"] = lossMSL1(image, fake, mask_hole)
 
                 # -----------------------------------------------------------
                 # Edge loss
                 # -----------------------------------------------------------
                 losses["edge"] = lossEdge(image, fake)
-                edge_scale = min(1.0, (0.95 ** (epoch - 20)))
 
             # -------------------------------------------------------------------
             # Style & Perceptual loss (no amp to avoid NaN, only full scale)
@@ -236,7 +232,6 @@ def main():
                 sl = lossStyle(orig_clamp, comp_full)
                 pl = lossPerceptual(orig_clamp, comp_full)
             losses["style"] = sl
-            style_scale = min(1.0, (epoch + 1) / 5.0)  # warm up from 0.2 to 1.0 over 5 epochs
             losses["perceptual"] = pl
 
             # DEBUG only: Check for loss values to find the cause of NaN
@@ -262,20 +257,25 @@ def main():
             # Final generator loss
             losses["totalG"] = (ADV_LAMBDA * losses["adv"] +
                                 L1_LAMBDA * losses["l1"] +
-                                EDGE_LAMBDA * edge_scale * losses["edge"] +
-                                STYLE_LAMBDA * style_scale * losses["style"] +
+                                edge_lambda * losses["edge"] +
+                                style_lambda * losses["style"] +
                                 PERCEPTUAL_LAMBDA * losses["perceptual"])
+
+            g_tot += losses["totalG"].item()
+            d_tot += losses["totalD"].item()
+            gd_tot += losses["globalD"].item()
+            ld_tot += losses["localD"].item()
+            bn += 1
 
             if i % SAVE_FREQ == 0:
                 raw = {k: float(losses[k]) for k in ["adv", "l1", "edge", "style", "perceptual"]}
                 weighted = {
                     "adv_w": ADV_LAMBDA * raw["adv"],
                     "l1_w": L1_LAMBDA * raw["l1"],
-                    "edge_w": EDGE_LAMBDA * edge_scale * raw["edge"],
-                    "style_w": STYLE_LAMBDA * style_scale * raw["style"],
+                    "edge_w": edge_lambda * raw["edge"],
+                    "style_w": style_lambda * raw["style"],
                     "perceptual_w": PERCEPTUAL_LAMBDA * raw["perceptual"]
                 }
-                #train_tqdm.write(f"[Debug] Raw: {raw} | Weighted: {weighted}")
                 logger.info(f"[Debug] Raw: {raw} | Weighted: {weighted}")
 
             # Use scaler, DO NOT detach before backward to keep gradients flow
@@ -321,10 +321,10 @@ def main():
         # Epoch logging: Training
         # -----------------------------------------------------------------------
         # Compute and store average losses for the current epoch
-        gmean = sum(blog["totalG"][-len(train_loader):]) / len(train_loader)
-        dmean = sum(blog["totalD"][-len(train_loader):]) / len(train_loader)
-        gdmean = sum(blog["globalD"][-len(train_loader):]) / len(train_loader)
-        ldmean = sum(blog["localD"][-len(train_loader):]) / len(train_loader)
+        gmean = g_tot / max(1, bn)
+        dmean = d_tot / max(1, bn)
+        gdmean = gd_tot / max(1, bn)
+        ldmean = ld_tot / max(1, bn)
 
         elog["totalG"].append(gmean)
         elog["totalD"].append(dmean)
@@ -334,10 +334,13 @@ def main():
         # -----------------------------------------------------------------------
         # Validation loop
         # -----------------------------------------------------------------------
-        val_losses = []
+        # Set validation mode
+        netG.eval(); globalD.eval(); localD.eval()
+
         with torch.no_grad():
-            ssim_square, lpips_square = 0.0, 0.0
-            square_batches = 0
+            ssim_tot, lpips_tot = 0.0, 0.0
+            l1_tot, edge_tot, style_tot, perc_tot = 0.0, 0.0, 0.0, 0.0
+            bn = 0
 
             for image, mask in val_loader:
                 image = image.to(device)
@@ -355,9 +358,9 @@ def main():
                 # Compute square mask metrics
                 unit_image = to_unit(image)
                 unit_comp = to_unit(composite)
-                ssim_square += ssim(unit_comp, unit_image).item()
-                lpips_square += lpips(unit_comp, unit_image).item()
-                square_batches += 1
+                ssim_tot += ssim(unit_comp, unit_image).item()
+                lpips_tot += lpips(unit_comp, unit_image).item()
+                bn += 1
 
                 # Adversarial (negated critic scores)
                 with half_precision():
@@ -371,7 +374,7 @@ def main():
                     # -----------------------------------------------------------
                     # Edge loss
                     # -----------------------------------------------------------
-                    l1_edge = lossEdge(image, fake)
+                    edge_loss = lossEdge(image, fake)
 
                 # ---------------------------------------------------------------
                 # Style & Perceptual loss (no amp to avoid NaN, only full scale)
@@ -382,25 +385,40 @@ def main():
                     vsl = lossStyle(orig_clamp, comp_full)
                     vpl = lossPerceptual(orig_clamp, comp_full)
 
-                # Final generator loss
-                totalG_val_loss = (L1_LAMBDA * l1_loss +
-                                   EDGE_LAMBDA * l1_edge +
-                                   STYLE_LAMBDA * vsl + # No scale here as this is validation set!
-                                   PERCEPTUAL_LAMBDA * vpl)
-                val_losses.append(totalG_val_loss.item())
+                # Loss totals for averaging
+                l1_tot += l1_loss.item()
+                edge_tot += edge_loss.item()
+                style_tot += vsl.item()
+                perc_tot += vpl.item()
 
         # -----------------------------------------------------------------------
         # Validation logging
         # -----------------------------------------------------------------------
-        avg_val_ssim = ssim_square / square_batches
-        avg_val_lpips = lpips_square / square_batches
-        elog["valG"].append(sum(val_losses) / len(val_losses))
+        avg_l1 = l1_tot / bn
+        avg_edge = edge_tot / bn
+        avg_style = style_tot / bn
+        avg_perc = perc_tot / bn
+
+        val_g = (
+            L1_LAMBDA * avg_l1 +
+            edge_lambda * avg_edge +
+            style_lambda * avg_style +
+            PERCEPTUAL_LAMBDA * avg_perc
+        )
+
+        avg_val_ssim = ssim_tot / bn
+        avg_val_lpips = lpips_tot / bn
+        elog["valG"].append(val_g)
 
         logger.info( # Validation logs
             f"Validation [Square-only] Epoch {epoch + 1}/{EPOCH_NUM} | "
-            f"Val G={elog['valG'][-1]:.4f}, "
-            f"Val SSIM={avg_val_ssim:.4f}, "
-            f"Val LPIPS={avg_val_lpips:.4f}"
+            f"G={val_g:.4f}, "
+            f"L1={avg_l1:.4f}, "
+            f"Edge={avg_edge:.4f}, "
+            f"Style={avg_style:.4f}, "
+            f"Perc={avg_perc:.4f} | "
+            f"SSIM={avg_val_ssim:.4f}, "
+            f"LPIPS={avg_val_lpips:.4f}"
         )
 
         logger.info( # Training logs
@@ -448,6 +466,8 @@ def main():
                     tolerance -= 1
                     if tolerance <= 0:
                         print(f"FID STOP: Early stopping at epoch {epoch+1}/{EPOCH_NUM}")
+                        logger.info(f"FID STOP: Early stopping at epoch {epoch+1}/{EPOCH_NUM}")
+                        early_stopping = True
 
             message = f"Epoch {epoch+1}: SSIM={ssim_val:.4f} LPIPS={lpips_val:.4f}"
             #print(f"Epoch {epoch+1}: SSIM={ssim_val:.4f} LPIPS={lpips_val:.4f}", end="")
@@ -467,6 +487,9 @@ def main():
                 normalize=False,
                 nrow=fixed_image.size(0)
             )
+
+        if early_stopping:
+            break
 
         # Conditional cleanup for memory (added after doubling epoch time)
         if torch.cuda.is_available():
@@ -514,9 +537,6 @@ def main():
     plt.close()
 
 if __name__ == "__main__":
-    # Redirect stdout to log file (keep inside __main__ to avoid multiprocessing errors)
-    #print(f"Logging to {LOG_FILE}\n")
-    #sys.stdout = utils.StdOut(LOG_FILE)
 
     # Start training process
     main()

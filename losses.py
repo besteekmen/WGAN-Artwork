@@ -163,6 +163,12 @@ def gradient_penalty(critic, real, fake, device):
 
 def lossMSL1(real, fake, mask):
     """Calculate multiscale loss for a given loss function.
+
+    Pixel-wise loss is calculated for the whole image at different scales,
+    as tracking only the hole cause seam artifacts at boundary and inconsistencies
+    Weighted l1 loss: https://arxiv.org/pdf/2401.03395
+    Also weighted: https://arxiv.org/pdf/1801.07892
+
     Arguments:
         real: [B, 3, H, W] values in [-1, 1]
         fake: [B, 3, H, W] values in [-1, 1]
