@@ -18,9 +18,10 @@ def init_losses(device=get_device()):
 
 def init_metrics(device=get_device()):
     """Initialize the metrics for model networks."""
+    # no need to normalize as unit ones are fed!
     ssim = StructuralSimilarityIndexMeasure(data_range=1.0).to(device)
     lpips = LearnedPerceptualImagePatchSimilarity(net_type='vgg').to(device)
-    fid = FrechetInceptionDistance(feature=2048, normalize=True).to(device)
+    fid = FrechetInceptionDistance(feature=2048).to(device)
     return ssim, lpips, fid
 
 class VGG19StyleLoss(nn.Module):

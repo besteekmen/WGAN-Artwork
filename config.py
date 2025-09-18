@@ -56,9 +56,19 @@ EDGE_LAMBDA_SCHEDULE = [ # was constant before as EDGE_LAMBDA = 0.05
 ]
 STYLE_LAMBDA_SCHEDULE = [ # was constant before as STYLE_LAMBDA = 60.0
     (0, 18.0),
-    (10, 45.0),
-    (20, 72.0),
-    (30, 90.0)
+    (10, 36.0),
+    (20, 48.0),
+    (30, 60.0)
+]
+ADV_LAMBDA_SCHEDULE = [ # was constant before as ADV_LAMBDA = 0.005
+    (0, 0.005),
+    (30, 0.0075),
+    (40, 0.01)
+]
+PERCEPTUAL_LAMBDA_SCHEDULE = [ # was constant before as PERCEPTUAL_LAMBDA = 0.1
+    (0, 0.1),
+    (25, 0.075),
+    (35, 0.05)
 ]
 ADV_LAMBDA = 0.005 # small weight for adversarial loss (for stable training)
 PERCEPTUAL_LAMBDA = 0.1 # Reduced from 0.05 for smoother early training

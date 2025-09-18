@@ -172,11 +172,25 @@ def make_dataloader(dataset, set_path, batch_size, num_workers, cuda, shuffle=Tr
 
 def prepare_dataset(data_path=DATA_PATH, batch_size=BATCH_SIZE, num_workers=NUM_WORKERS):
     """Prepare datasets through dataloaders."""
-    train_set = CroppedImageDataset(crops_dir=os.path.join(DATA_PATH, 'train'), split='train')
-    val_set = CroppedImageDataset(crops_dir=os.path.join(DATA_PATH, 'val'), split='val')
-    train_loader = make_dataloader(train_set, 'train', BATCH_SIZE, NUM_WORKERS, cuda=is_cuda())
-    val_loader = make_dataloader(val_set, 'val', BATCH_SIZE, NUM_WORKERS, cuda=is_cuda())
+    train_set = CroppedImageDataset(crops_dir=os.path.join(data_path, 'train'), split='train')
+    val_set = CroppedImageDataset(crops_dir=os.path.join(data_path, 'val'), split='val')
+    train_loader = make_dataloader(train_set, 'train', batch_size, num_workers, cuda=is_cuda())
+    val_loader = make_dataloader(val_set, 'val', batch_size, num_workers, cuda=is_cuda())
     return train_loader, val_loader
+
+def prepare_batch(batch, device, irr_ratio: float | None = None,
+                  non_blocking: bool = True):
+    """Prepare the given batch of images by setting device and mask selection."""
+    image, mask = batch # Dataset returns batches of: image, mask (1=known, 0=hole)
+    image = image.to(device, non_blocking=non_blocking)  # ground truth
+    mask = mask.to(device, non_blocking=non_blocking)  # masks, [B, 2, H, W] (1=known, 0=hole)
+
+    if irr_ratio is not None:
+        mask = randomize_masks(mask, irr_ratio)
+    else:
+        mask = mask[:, 0:1, :, :] # no randomization, only square masks
+    mask_hole = (1.0 - mask).float()  # (1=hole, 0=known)
+    return image, mask_hole
 
 def preextract_fivecrops(source_dir, target_dir, crop_size=LOCAL_PATCH_SIZE):
     """

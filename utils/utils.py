@@ -71,6 +71,11 @@ def to_signed(tensor: torch.Tensor) -> torch.Tensor:
     """Rescale tensor from [0,1] to [-1,1]."""
     return (tensor * 2) - 1
 
+def clamp_f32(x: torch.Tensor) -> torch.Tensor:
+    """Ensure float32 output clamped to [-1,1]."""
+    x = torch.clamp(x, -1.0, 1.0)
+    return x if x.dtype == torch.float32 else x.float()
+
 def create_folder(folder_path):
     """Create a folder if it does not exist."""
     try:

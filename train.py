@@ -1,10 +1,7 @@
-import os
-import matplotlib.pyplot as plt
 import torch
 import torch.nn.parallel
 import torch.backends.cudnn as cudnn
 import torch.utils.data
-import torchvision.utils as vutils
 from datetime import datetime
 from tqdm import tqdm
 from multiprocessing import freeze_support
@@ -13,11 +10,11 @@ from torch import amp
 # Project specific modules
 from config import *
 from losses import gradient_penalty, init_losses, lossMSL1, init_metrics, lossEdge
-from models.model_builder import init_optimizers, init_nets, save_checkpoint, setup_model
+from models.model_builder import init_optimizers, init_nets, save_checkpoint, setup_model, forward_pass
 from utils.utils import to_unit, set_seed, get_device, print_device, make_run_directory, half_precision, \
-    full_precision, get_schedule, set_logger
-from dataset import prepare_dataset, randomize_masks
-from utils.vision_utils import crop_local_patch
+    full_precision, get_schedule, set_logger, is_cuda, clamp_f32
+from dataset import prepare_dataset, prepare_batch
+from utils.vision_utils import crop_local_patch, plot_loss, set_fixed, save_images
 
 # ------------------------------------------------------------------------------
 # Training function
@@ -52,30 +49,16 @@ def main():
     lossStyle, lossPerceptual = init_losses()
     ssim, lpips, fid = init_metrics()
 
-    # Setup gradient scaler
-    # Scales losses for mixed precision, hence fast training and low memory usage
-    scalerG = amp.GradScaler()
-    scaler_globalD = amp.GradScaler()
-    scaler_localD = amp.GradScaler()
+    # Setup gradient scaler (provide mixed precision for faster training and low memory usage)
+    scalerG = amp.GradScaler(enabled=is_cuda())
+    scaler_globalD = amp.GradScaler(enabled=is_cuda())
+    scaler_localD = amp.GradScaler(enabled=is_cuda())
 
     # Setup datasets loaders
     train_loader, val_loader = prepare_dataset()
 
     # Setup fixed samples for visualization
-    fixed_masked = []
-    fixed_image = []
-    fixed_mask_hole = []
-    for i in range(min(BATCH_SIZE, len(train_loader.dataset))):
-        img, mask = train_loader.dataset[i] # mask: [2, H, W] (1=known, 0=hole)
-        # half or less irregular? same style pics?
-        shape = torch.randint(0, 2, (1,), device=mask.device).item()
-        mask = mask[shape].unsqueeze(0) # mask: [1, H, W]
-        fixed_masked.append((img * mask).unsqueeze(0)) # create the masked sample
-        fixed_image.append(img.unsqueeze(0)) # ground truth
-        fixed_mask_hole.append((1.0 - mask).unsqueeze(0)) # hole mask (1=hole, 0=known)
-    fixed_masked = torch.cat(fixed_masked, dim=0).to(device)
-    fixed_image = torch.cat(fixed_image, dim=0).to(device)
-    fixed_mask_hole = torch.cat(fixed_mask_hole, dim=0).to(device)
+    fixed_masked, fixed_image, fixed_mask_hole = set_fixed(train_loader.dataset, device=device)
 
     # Setup trackers for batch loss and average epoch loss
     blog = { # batch loss logging
@@ -115,6 +98,8 @@ def main():
         nan_log_i = -999999
 
         # Set lambda schedules
+        adv_lambda = get_schedule(epoch, ADV_LAMBDA_SCHEDULE)
+        perc_lambda = get_schedule(epoch, PERCEPTUAL_LAMBDA_SCHEDULE)
         style_lambda = get_schedule(epoch, STYLE_LAMBDA_SCHEDULE)
         edge_lambda = get_schedule(epoch, EDGE_LAMBDA_SCHEDULE)
         irr_ratio = get_schedule(epoch, IRR_RATIO_SCHEDULE)
@@ -124,17 +109,15 @@ def main():
 
         # Initialize loss sums
         g_tot, d_tot, gd_tot, ld_tot = 0.0, 0.0, 0.0, 0.0
-        bn = 0
+        num_batches = 0
 
         if torch.cuda.is_available():
             torch.cuda.reset_peak_memory_stats()
 
         for i, (image, mask) in train_tqdm:
-            # Dataset returns batches of: image, mask (1=known, 0=hole)
-            image = image.to(device, non_blocking=True) # ground truth
-            mask = mask.to(device, non_blocking=True) # masks, [B, 2, H, W] (1=known, 0=hole)
-            mask = randomize_masks(mask, irr_ratio)
-            mask_hole = (1.0 - mask).float() # (1=hole, 0=known)
+            image, mask_hole = prepare_batch((image, mask), device,
+                                                   irr_ratio = irr_ratio,
+                                                   non_blocking = True)
 
             # Create a dictionary to keep batch losses
             losses = {}
@@ -147,21 +130,16 @@ def main():
             optimLD.zero_grad()
 
             with half_precision():
-                fake = netG(image, mask_hole) # full fake image (coarse + fine)
-                fake = torch.clamp(fake, -1.0, 1.0)
-                composite = fake * mask_hole + image * mask # blend with known
-                composite = torch.clamp(composite, -1.0, 1.0)
-
+                fake, composite = forward_pass(netG, image, mask_hole)
             # Create detached versions to avoid multiple forwarding of generator
-            fake_detached = fake.detach()
-            composite_detached = fake_detached * mask_hole + image * mask
+            composite_detached = composite.detach()
 
             # Update globalD for global critic
             with half_precision():
                 real_global = globalD(image)
                 fake_global = globalD(composite_detached)
             # For stability, gradient penalty HAS to be float32! (no amp)
-            gp_global = gradient_penalty(globalD, image, composite_detached, device)
+            gp_global = gradient_penalty(globalD, image.float(), composite_detached.float(), device)
             loss_globalD = (fake_global.mean() - real_global.mean()) + GP_LAMBDA * gp_global
 
             # Use scaler, DO NOT detach before backward to keep gradients flow
@@ -180,7 +158,7 @@ def main():
                 real_local = localD(real_patches)
                 fake_local = localD(fake_patches)
             # For stability, gradient penalty HAS to be float32! (no amp)
-            gp_local = gradient_penalty(localD, real_patches, fake_patches, device)
+            gp_local = gradient_penalty(localD, real_patches.float(), fake_patches.float(), device)
             loss_localD = (fake_local.mean() - real_local.mean()) + GP_LAMBDA * gp_local
 
             # Use scaler, DO NOT detach before backward to keep gradients flow
@@ -195,7 +173,7 @@ def main():
             losses["totalD"] = (losses["globalD"] + losses["localD"]).detach()
 
             # Free memory for discriminator step
-            del fake_detached, composite_detached, real_global, fake_global, gp_global
+            del composite_detached, real_global, fake_global, gp_global
             del real_patches, fake_patches, real_local, fake_local, gp_local
 
             # -------------------------------------------------------------------
@@ -205,32 +183,24 @@ def main():
             optimG.zero_grad()
 
             with half_precision():
-                # ---------------------------------------------------------------
                 # Adversarial loss (negated critic scores)
-                # ---------------------------------------------------------------
                 adv_global = -globalD(composite).mean()
                 patches = crop_local_patch(composite, mask_hole)
                 adv_local = -localD(patches).mean()
                 losses["adv"] = adv_global + adv_local
 
-                # ---------------------------------------------------------------
                 # Pixel-wise L1 loss (multiscale, under amp)
-                # ---------------------------------------------------------------
                 losses["l1"] = lossMSL1(image, fake, mask_hole)
 
-                # -----------------------------------------------------------
                 # Edge loss
-                # -----------------------------------------------------------
                 losses["edge"] = lossEdge(image, fake)
 
-            # -------------------------------------------------------------------
             # Style & Perceptual loss (no amp to avoid NaN, only full scale)
-            # -------------------------------------------------------------------
             with full_precision():
-                comp_full = torch.clamp(fake * mask_hole + image * mask, -1.0, 1.0).float()
-                orig_clamp = torch.clamp(image, -1.0, 1.0).float()
-                sl = lossStyle(orig_clamp, comp_full)
-                pl = lossPerceptual(orig_clamp, comp_full)
+                comp_full = clamp_f32(composite) # reused composite
+                orig_full = clamp_f32(image)
+                sl = lossStyle(orig_full, comp_full)
+                pl = lossPerceptual(orig_full, comp_full)
             losses["style"] = sl
             losses["perceptual"] = pl
 
@@ -255,26 +225,26 @@ def main():
                 continue
 
             # Final generator loss
-            losses["totalG"] = (ADV_LAMBDA * losses["adv"] +
+            losses["totalG"] = (adv_lambda * losses["adv"] +
                                 L1_LAMBDA * losses["l1"] +
                                 edge_lambda * losses["edge"] +
                                 style_lambda * losses["style"] +
-                                PERCEPTUAL_LAMBDA * losses["perceptual"])
+                                perc_lambda * losses["perceptual"])
 
             g_tot += losses["totalG"].item()
             d_tot += losses["totalD"].item()
             gd_tot += losses["globalD"].item()
             ld_tot += losses["localD"].item()
-            bn += 1
+            num_batches += 1
 
             if i % SAVE_FREQ == 0:
                 raw = {k: float(losses[k]) for k in ["adv", "l1", "edge", "style", "perceptual"]}
                 weighted = {
-                    "adv_w": ADV_LAMBDA * raw["adv"],
+                    "adv_w": adv_lambda * raw["adv"],
                     "l1_w": L1_LAMBDA * raw["l1"],
                     "edge_w": edge_lambda * raw["edge"],
                     "style_w": style_lambda * raw["style"],
-                    "perceptual_w": PERCEPTUAL_LAMBDA * raw["perceptual"]
+                    "perceptual_w": perc_lambda * raw["perceptual"]
                 }
                 logger.info(f"[Debug] Raw: {raw} | Weighted: {weighted}")
 
@@ -306,25 +276,19 @@ def main():
 
                 # Save the current batch (16) images: [image | masked | composite]
                 with torch.no_grad():
-                    vis_comp = composite # use a clone if the tensor is manipulated later
-                    masked = image * mask
-                    grid = torch.cat( # dimensions: (C,H,W)
-                        [to_unit(image), to_unit(masked), to_unit(vis_comp)],
-                        3) # horizontal stack per sample using width dimension
-                    vutils.save_image(grid,
-                                      os.path.join(out_path, f'comparison_epoch({epoch})_batch({i}).png'),
-                                      normalize=False, # done already above with to_unit
-                                      nrow=1) # 1 row per sample
+                    masked = image * (1.0 - mask_hole)
+                    save_images(to_unit(image), to_unit(masked), to_unit(composite), 3,  # horizontal stack per sample using width dimension
+                                1, out_path, f'comparison_epoch({epoch})_batch({i}).png')
             global_step += 1
 
         # -----------------------------------------------------------------------
         # Epoch logging: Training
         # -----------------------------------------------------------------------
         # Compute and store average losses for the current epoch
-        gmean = g_tot / max(1, bn)
-        dmean = d_tot / max(1, bn)
-        gdmean = gd_tot / max(1, bn)
-        ldmean = ld_tot / max(1, bn)
+        gmean = g_tot / max(1, num_batches)
+        dmean = d_tot / max(1, num_batches)
+        gdmean = gd_tot / max(1, num_batches)
+        ldmean = ld_tot / max(1, num_batches)
 
         elog["totalG"].append(gmean)
         elog["totalD"].append(dmean)
@@ -340,50 +304,36 @@ def main():
         with torch.no_grad():
             ssim_tot, lpips_tot = 0.0, 0.0
             l1_tot, edge_tot, style_tot, perc_tot = 0.0, 0.0, 0.0, 0.0
-            bn = 0
+            val_batches = 0
 
             for image, mask in val_loader:
-                image = image.to(device)
-                mask = mask.to(device)
-                #mask = randomize_masks(mask)
-                mask = mask[:, 0:1, :, :] # only use square masks for validation
-                mask_hole = (1.0 - mask).float()  # (1=hole, 0=known)
+                # only use square masks for validation
+                image, mask_hole = prepare_batch((image, mask), device,
+                                                       non_blocking=True)
 
                 # Generator forward w/o grad
-                fake = netG(image, mask_hole)
-                fake = torch.clamp(fake, -1.0, 1.0)
-                composite = fake * mask_hole + image * mask
-                composite = torch.clamp(composite, -1.0, 1.0)
+                fake, composite = forward_pass(netG, image, mask_hole)
 
                 # Compute square mask metrics
                 unit_image = to_unit(image)
                 unit_comp = to_unit(composite)
                 ssim_tot += ssim(unit_comp, unit_image).item()
                 lpips_tot += lpips(unit_comp, unit_image).item()
-                bn += 1
+                val_batches += 1
 
-                # Adversarial (negated critic scores)
-                with half_precision():
-                    # Adv loss removed, shouldn't be calculated for validation!
-
-                    # -----------------------------------------------------------
+                with half_precision(): # no adv loss for validation!
                     # Pixel-wise L1 loss (multiscale, under amp)
-                    # -----------------------------------------------------------
                     l1_loss = lossMSL1(image, fake, mask_hole)
 
-                    # -----------------------------------------------------------
                     # Edge loss
-                    # -----------------------------------------------------------
                     edge_loss = lossEdge(image, fake)
 
-                # ---------------------------------------------------------------
                 # Style & Perceptual loss (no amp to avoid NaN, only full scale)
-                # ---------------------------------------------------------------
                 with full_precision():
-                    comp_full = torch.clamp(fake * mask_hole + image * mask, -1.0, 1.0).float()
-                    orig_clamp = torch.clamp(image, -1.0, 1.0).float()
-                    vsl = lossStyle(orig_clamp, comp_full)
-                    vpl = lossPerceptual(orig_clamp, comp_full)
+                    comp_full = clamp_f32(composite) # reused composite
+                    orig_full = clamp_f32(image)
+                    vsl = lossStyle(orig_full, comp_full)
+                    vpl = lossPerceptual(orig_full, comp_full)
 
                 # Loss totals for averaging
                 l1_tot += l1_loss.item()
@@ -394,20 +344,20 @@ def main():
         # -----------------------------------------------------------------------
         # Validation logging
         # -----------------------------------------------------------------------
-        avg_l1 = l1_tot / bn
-        avg_edge = edge_tot / bn
-        avg_style = style_tot / bn
-        avg_perc = perc_tot / bn
+        avg_l1 = l1_tot / val_batches
+        avg_edge = edge_tot / val_batches
+        avg_style = style_tot / val_batches
+        avg_perc = perc_tot / val_batches
 
         val_g = (
             L1_LAMBDA * avg_l1 +
             edge_lambda * avg_edge +
             style_lambda * avg_style +
-            PERCEPTUAL_LAMBDA * avg_perc
+            perc_lambda * avg_perc
         )
 
-        avg_val_ssim = ssim_tot / bn
-        avg_val_lpips = lpips_tot / bn
+        avg_val_ssim = ssim_tot / val_batches
+        avg_val_lpips = lpips_tot / val_batches
         elog["valG"].append(val_g)
 
         logger.info( # Validation logs
@@ -439,10 +389,7 @@ def main():
         # Epoch logging and visualization (fixed samples)
         # -------------------------------------------- ---------------------------
         with torch.no_grad():
-            fixed_fake = netG(fixed_image, fixed_mask_hole).detach()
-            fixed_fake = torch.clamp(fixed_fake, -1.0, 1.0)
-            fixed_comp = (fixed_fake * fixed_mask_hole + fixed_image * (1.0 - fixed_mask_hole)).detach()
-            fixed_comp = torch.clamp(fixed_comp, -1.0, 1.0)
+            fixed_fake, fixed_comp = forward_pass(netG, fixed_image, fixed_mask_hole)
 
             # Convert images to [0,1] for RGB and visualization
             unit_image = to_unit(fixed_image)
@@ -450,17 +397,17 @@ def main():
             unit_masked = to_unit(fixed_masked)
 
             # Print quality metrics values for the current epoch
-            ssim_val = ssim(unit_comp, unit_image).item()
-            lpips_val = lpips(unit_comp, unit_image).item()
-            fid_val = None
+            fixed_ssim = ssim(unit_comp, unit_image).item()
+            fixed_lpips = lpips(unit_comp, unit_image).item()
+            fixed_fid = None
             if (epoch + 1) % 5 == 0:
                 fid.reset()
                 fid.update(unit_image, real=True)
                 fid.update(unit_comp, real=False)
-                fid_val = fid.compute().item()
+                fixed_fid = fid.compute().item()
 
-                if fid_val < best_fid:
-                    best_fid = fid_val
+                if fixed_fid < best_fid:
+                    best_fid = fixed_fid
                     tolerance = 5 # reset if improved
                 else:
                     tolerance -= 1
@@ -469,24 +416,15 @@ def main():
                         logger.info(f"FID STOP: Early stopping at epoch {epoch+1}/{EPOCH_NUM}")
                         early_stopping = True
 
-            message = f"Epoch {epoch+1}: SSIM={ssim_val:.4f} LPIPS={lpips_val:.4f}"
-            #print(f"Epoch {epoch+1}: SSIM={ssim_val:.4f} LPIPS={lpips_val:.4f}", end="")
-            if fid_val is not None:
-                message += f", FID={fid_val:.2f}"
-                #print(f", FID={fid_val:.2f}")
+            message = f"Epoch {epoch+1}: SSIM={fixed_ssim:.4f} LPIPS={fixed_lpips:.4f}"
+            if fixed_fid is not None:
+                message += f", FID={fixed_fid:.2f}"
             print(message)
             logger.info(message)
 
             # Save the current batch (16) images: [image1 | image2 | image3 | ...]
-            grid = torch.cat(
-                [unit_image, unit_masked, unit_comp],
-                0) # vertical stack per sample
-            vutils.save_image(
-                grid,
-                os.path.join(out_path, f'fixed_epoch{epoch+1}.png'),
-                normalize=False,
-                nrow=fixed_image.size(0)
-            )
+            save_images(unit_image, unit_masked, unit_comp, 0, # vertical stack per sample
+                        fixed_image.size(0), out_path, f'fixed_epoch{epoch+1}.png')
 
         if early_stopping:
             break
@@ -510,31 +448,9 @@ def main():
     stop_time = datetime.now()
     print(f"Time:{(stop_time - start_time)} | Steps:{global_step}")
 
-    # Plot per-batch loss curve
-    plt.figure(figsize=(10, 5))
-    plt.title("Generator and Discriminator Loss During Training (per batch)")
-    plt.plot(blog["totalG"], label="G (batch)")
-    plt.plot(blog["totalD"], label="D (batch)")
-    plt.plot(blog["globalD"], label="gD (batch)")
-    plt.plot(blog["localD"], label="lD (batch)")
-    plt.xlabel("Iterations")
-    plt.ylabel("Loss")
-    plt.legend()
-    plt.savefig(os.path.join(out_path, "loss_curve_batch.png"))
-    plt.close()
-
-    # Plot per-epoch averaged loss curve (Like DCGAN)
-    plt.figure(figsize=(10, 5))
-    plt.title("Generator and Discriminator Loss During Training (per epoch avg)")
-    plt.plot(elog["totalG"], label="G (epoch avg)")
-    plt.plot(elog["totalD"], label="D (epoch avg)")
-    plt.plot(elog["globalD"], label="gD (epoch avg)")
-    plt.plot(elog["localD"], label="lD (epoch avg)")
-    plt.xlabel("Epoch")
-    plt.ylabel("Loss")
-    plt.legend()
-    plt.savefig(os.path.join(out_path, "loss_curve_epoch.png"))
-    plt.close()
+    # Plot per-batch and per-epoch loss curve
+    plot_loss("batch", blog, out_path)
+    plot_loss("epoch", elog, out_path) # per epoch average
 
 if __name__ == "__main__":
 

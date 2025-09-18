@@ -88,3 +88,9 @@ def load_checkpoint(netG, globalD, localD, optimG, optimGD, optimLD, checkpoint_
     optimGD.load_state_dict(checkpoint['optimGD'])
     optimLD.load_state_dict(checkpoint['optimLD'])
     return checkpoint.get('epoch', None)
+
+def forward_pass(netG, image, mask_hole):
+    """Perform forward pass and return generated and composite images."""
+    fake = netG(image, mask_hole)
+    composite = fake * mask_hole + image * (1.0 - mask_hole)
+    return fake, composite
