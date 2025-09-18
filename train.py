@@ -12,7 +12,7 @@ from config import *
 from losses import gradient_penalty, init_losses, lossMSL1, init_metrics, lossEdge
 from models.model_builder import init_optimizers, init_nets, save_checkpoint, setup_model, forward_pass
 from utils.utils import to_unit, set_seed, get_device, print_device, make_run_directory, half_precision, \
-    full_precision, get_schedule, set_logger, is_cuda, clamp_f32
+    full_precision, get_schedule, set_logger, is_cuda, clamp_f32, to_u8
 from dataset import prepare_dataset, prepare_batch
 from utils.vision_utils import crop_local_patch, plot_loss, set_fixed, save_images
 
@@ -414,8 +414,8 @@ def main():
             fixed_fid = None
             if (epoch + 1) % 5 == 0:
                 fid.reset()
-                fid.update(unit_image, real=True)
-                fid.update(unit_comp, real=False)
+                fid.update(to_u8(unit_image), real=True)
+                fid.update(to_u8(unit_comp), real=False)
                 fixed_fid = fid.compute().item()
 
                 if fixed_fid < best_fid:

@@ -71,6 +71,10 @@ def to_signed(tensor: torch.Tensor) -> torch.Tensor:
     """Rescale tensor from [0,1] to [-1,1]."""
     return (tensor * 2) - 1
 
+def to_u8(tensor: torch.Tensor) -> torch.Tensor:
+    """Rescale tensor from [0,1] to [0,255]."""
+    return (tensor * 255.0).round().clamp_(0, 255).to(torch.uint8)
+
 def clamp_f32(x: torch.Tensor) -> torch.Tensor:
     """Ensure float32 output clamped to [-1,1]."""
     x = torch.clamp(x, -1.0, 1.0)
