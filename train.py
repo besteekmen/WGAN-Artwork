@@ -82,7 +82,9 @@ def main():
     global_step = 0
     start_time = datetime.now()
     tolerance = 5
+    val_tolerance = 3
     best_fid = float("inf")
+    best_valG = float("inf")
     early_stopping = False
 
     for epoch in range(start_epoch, EPOCH_NUM):
@@ -355,6 +357,16 @@ def main():
             style_lambda * avg_style +
             perc_lambda * avg_perc
         )
+
+        if val_g < best_valG:
+            best_valG = val_g
+            val_tolerance = 3  # reset if improved
+        else:
+            val_tolerance -= 1
+            if val_tolerance <= 0:
+                print(f"VALG STOP: Early stopping at epoch {epoch + 1}/{EPOCH_NUM}")
+                logger.info(f"VALG STOP: Early stopping at epoch {epoch + 1}/{EPOCH_NUM}")
+                early_stopping = True
 
         avg_val_ssim = ssim_tot / val_batches
         avg_val_lpips = lpips_tot / val_batches
