@@ -14,7 +14,7 @@ from models.model_builder import init_optimizers, init_nets, save_checkpoint, se
 from utils.utils import to_unit, set_seed, get_device, print_device, make_run_directory, half_precision, \
     full_precision, get_schedule, set_logger, is_cuda, clamp_f32, to_u8
 from dataset import prepare_dataset, prepare_batch
-from utils.vision_utils import crop_local_patch, plot_loss, set_fixed, save_images
+from utils.vision_utils import crop_local_patch, plot_loss, set_fixed, save_images, sample_offset
 
 # ------------------------------------------------------------------------------
 # Training function
@@ -33,10 +33,8 @@ def main():
     device = get_device()
 
     # CUDNN setups
-    cudnn.benchmark = True
-    # Set to false if strange OOM (Out of memory) issues seen
-    # cudnn.deterministic = True
-    # Set to true if exact reproducibility is needed and disable benchmark
+    cudnn.benchmark = True # set False if strange OOM (Out of memory) occurs
+    # cudnn.deterministic = True # for exact reproducibility, disable benchmark
 
     # Initialize or load the model
     netG, globalD, localD = init_nets(device)
@@ -45,11 +43,11 @@ def main():
                               optimG, optimGD, optimLD, check_path, device)
     # To load a pretrained model, add file_name as parameter to setup_model
 
-    # Setup losses and quality metrics
+    # Init losses and quality metrics
     lossStyle, lossPerceptual = init_losses()
     ssim, lpips, fid = init_metrics()
 
-    # Setup gradient scaler (provide mixed precision for faster training and low memory usage)
+    # Set gradient scaler (mixed precision for faster training and low memory usage)
     scalerG = amp.GradScaler(enabled=is_cuda())
     scaler_globalD = amp.GradScaler(enabled=is_cuda())
     scaler_localD = amp.GradScaler(enabled=is_cuda())
@@ -82,9 +80,7 @@ def main():
     global_step = 0
     start_time = datetime.now()
     tolerance = 5
-    val_tolerance = 3
     best_fid = float("inf")
-    best_valG = float("inf")
     early_stopping = False
 
     for epoch in range(start_epoch, EPOCH_NUM):
@@ -154,8 +150,9 @@ def main():
 
             # Update localD for local critic
             # Using detached versions for discriminator is okay, but not okay for generator
-            real_patches = crop_local_patch(image, mask_hole)
-            fake_patches = crop_local_patch(composite_detached, mask_hole)
+            dy, dx = sample_offset(image.size(0), device=image.device)
+            real_patches = crop_local_patch(image, mask_hole, offsets=(dy, dx))
+            fake_patches = crop_local_patch(composite_detached, mask_hole, offsets=(dy, dx))
             with half_precision():
                 real_local = localD(real_patches)
                 fake_local = localD(fake_patches)
@@ -187,7 +184,7 @@ def main():
             with half_precision():
                 # Adversarial loss (negated critic scores)
                 adv_global = -globalD(composite).mean()
-                patches = crop_local_patch(composite, mask_hole)
+                patches = crop_local_patch(composite, mask_hole, offsets=(dy, dx))
                 adv_local = -localD(patches).mean()
                 losses["adv"] = adv_global + adv_local
 
@@ -357,16 +354,6 @@ def main():
             style_lambda * avg_style +
             perc_lambda * avg_perc
         )
-
-        if val_g < best_valG:
-            best_valG = val_g
-            val_tolerance = 3  # reset if improved
-        else:
-            val_tolerance -= 1
-            if val_tolerance <= 0:
-                print(f"VALG STOP: Early stopping at epoch {epoch + 1}/{EPOCH_NUM}")
-                logger.info(f"VALG STOP: Early stopping at epoch {epoch + 1}/{EPOCH_NUM}")
-                early_stopping = True
 
         avg_val_ssim = ssim_tot / val_batches
         avg_val_lpips = lpips_tot / val_batches

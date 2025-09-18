@@ -35,6 +35,7 @@ G_HIDDEN = 64 # base generator channels (stage)
 IMAGE_CHANNELS = 3 # Num of color channels
 X_DIM = 64
 LOCAL_PATCH_SIZE = 128 # Patch size for local discriminator
+JITTER = 16
 
 # --- Mask settings ---
 IRR_RATIO_SCHEDULE = [ # irregular masks ratio was constant at 0.3 before

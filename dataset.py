@@ -10,7 +10,7 @@ from torchvision import transforms
 from torchvision.transforms.v2 import FiveCrop, RandomCrop
 from tqdm import tqdm
 from utils.utils import clear_folder, is_cuda, get_device
-from config import LOCAL_PATCH_SIZE, DATA_PATH, BATCH_SIZE, NUM_WORKERS
+from config import LOCAL_PATCH_SIZE, DATA_PATH, BATCH_SIZE, NUM_WORKERS, CROP_SIZE, SEED
 
 
 class CroppedImageDataset(Dataset):
@@ -135,12 +135,12 @@ def randomize_masks(mask, irr_ratio=0.3):
     Returns:
         mask: a batch of masks of randomized form with shape [B, 1, H, W].
     """
-    B = mask.size(0)
-    form = torch.zeros(B, dtype=torch.long, device=mask.device)
-    irr = round(irr_ratio * B)
-    i = torch.randperm(B, device=mask.device)[:irr]
+    batch_size = mask.size(0)
+    form = torch.zeros(batch_size, dtype=torch.long, device=mask.device)
+    irr = round(irr_ratio * batch_size)
+    i = torch.randperm(batch_size, device=mask.device)[:irr]
     form[i] = 1
-    i = form.view(B, 1, 1, 1).expand(-1, 1, *mask.shape[2:])
+    i = form.view(batch_size, 1, 1, 1).expand(-1, 1, *mask.shape[2:])
     return mask.gather(1, i)
 
 def make_dataloader(dataset, set_path, batch_size, num_workers, cuda, shuffle=True):
@@ -192,48 +192,8 @@ def prepare_batch(batch, device, irr_ratio: float | None = None,
     mask_hole = (1.0 - mask).float()  # (1=hole, 0=known)
     return image, mask_hole
 
-def preextract_fivecrops(source_dir, target_dir, crop_size=LOCAL_PATCH_SIZE):
-    """
-    Extract five fixed size crops (center + 4 corners) from each image,
-    then save them all as separate images.
-
-    Args:
-        source_dir (str): Directory path containing the images to crop.
-        target_dir (str): Directory path where the extracted crops will be saved.
-        crop_size (int): Size of the crop to extract.
-    """
-    cropper = FiveCrop(crop_size)
-    image_ext = {'.jpg', '.jpeg', '.png'}
-
-    #os.makedirs(target_dir, exist_ok=True)
-    clear_folder(target_dir)
-    print(f"Extracting five crops from images in ({source_dir}) to ({target_dir}).")
-
-    for root, _, files in os.walk(source_dir):
-        # Skip folders starting with "_"
-        if any(folder.startswith('_') for folder in os.path.relpath(root, source_dir).split(os.sep)):
-            continue
-
-        for filename in tqdm(files, desc=f"Scanning {os.path.basename(root)}", leave=False):
-            ext = os.path.splitext(filename)[1].lower()
-            if ext not in image_ext:
-                continue
-
-            image_path = os.path.join(root, filename)
-            try:
-                image = Image.open(image_path).convert('RGB')
-                crops = cropper(image)
-
-                base_name = os.path.splitext(filename)[0]
-                for i, crop in enumerate(crops):
-                    save_name = f"{base_name}_crop{i}.png"
-                    save_path = os.path.join(target_dir, save_name)
-                    crop.save(save_path)
-
-            except Exception as e:
-                print(f"Failed processing ({image_path}): {e}.")
-
-    print(f"Finished extracting all crops.")
+def get_crops(source_dir, crop_size=CROP_SIZE, crops_per_image=3, seed=SEED):
+    """Cuts specified number of crops from the images in given directory."""
 
 def preextract_randomcrops(source_dir, target_dir, crop_size=LOCAL_PATCH_SIZE, crops_per_image=3):
     """

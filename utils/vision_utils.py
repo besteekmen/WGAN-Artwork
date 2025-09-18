@@ -3,7 +3,7 @@ import torch
 import torch.nn.functional as F
 import torchvision.utils as vutils
 from matplotlib import pyplot as plt
-from config import LOCAL_PATCH_SIZE, SCALES, BATCH_SIZE
+from config import LOCAL_PATCH_SIZE, SCALES, BATCH_SIZE, JITTER
 
 def downsample(img, scales=None):
     """Return a list of images downsampled to different scales."""
@@ -15,11 +15,13 @@ def downsample(img, scales=None):
                           align_corners=False) for s in scales]
 
 def crop_local_patch(images: torch.Tensor, masks_hole: torch.Tensor,
-                     jitter: int = 16, pad_mode: str = 'reflect',
+                     offsets: tuple[torch.Tensor, torch.Tensor],
+                     pad_mode: str = 'reflect',
                      patch_size: int = LOCAL_PATCH_SIZE) -> torch.Tensor:
     """
     images: tensor of shape [B, C, H, W],
     masks_hole: tensor of shape [B, 1, H, W],
+    offsets: tuple[torch.Tensor, torch.Tensor], offset (dy, dx)
     returns: tensor of shape [B, C, patch_size, patch_size]
     """
     B, C, H, W = images.shape
@@ -44,11 +46,12 @@ def crop_local_patch(images: torch.Tensor, masks_hole: torch.Tensor,
     cy = ((top + bottom) // 2) + pad # [B]
     cx = ((left + right) // 2) + pad # [B]
 
-    if jitter > 0:
-        cy = cy + torch.randint(-jitter, jitter+1, (B,), device=images.device)
-        cx = cx + torch.randint(-jitter, jitter+1, (B,), device=images.device)
-    cy = torch.clamp(cy, half, hp - half)
-    cx = torch.clamp(cx, half, wp - half)
+    dy, dx = offsets
+    dy = dy.to(images.device)
+    dx = dx.to(images.device)
+
+    cy = torch.clamp(cy + dy, half, hp - half)
+    cx = torch.clamp(cx + dx, half, wp - half)
 
     # Top-left corners in the padded image (exact center cropping, no clamping needed)
     y0 = cy - half # [B]
@@ -65,7 +68,13 @@ def crop_local_patch(images: torch.Tensor, masks_hole: torch.Tensor,
 
     return torch.cat(patches, dim=0)
 
-def set_fixed(train_dataset, batch_size=BATCH_SIZE, device=None):
+def sample_offset(batch_size: int = BATCH_SIZE, jitter: int = JITTER, device=None) -> tuple[torch.Tensor, torch.Tensor]:
+    """Sample batch_size number of offsets in [-jitter, jitter]."""
+    dy = torch.randint(-jitter, jitter + 1, (batch_size,), device=device)
+    dx = torch.randint(-jitter, jitter + 1, (batch_size,), device=device)
+    return dy, dx
+
+def set_fixed(train_dataset, batch_size: int = BATCH_SIZE, device=None):
     """Create a fixed set of samples for consistent epoch visualization."""
     fixed_masked = []
     fixed_image = []
