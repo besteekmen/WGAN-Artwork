@@ -200,7 +200,7 @@ def main():
                 orig_full = clamp_f32(image)
                 sl = lossStyle(orig_full, comp_full)
                 pl = lossPerceptual(orig_full, comp_full)
-            scale = vgg_scale(mask_hole)
+            scale = vgg_scale(mask_hole).detach()
             sl *= scale
             pl *= scale
             losses["style"] = sl
