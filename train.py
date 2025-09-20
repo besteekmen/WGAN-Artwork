@@ -9,10 +9,10 @@ from torch import amp
 
 # Project specific modules
 from config import *
-from losses import gradient_penalty, init_losses, lossMSL1, init_metrics, lossEdge
+from losses import gradient_penalty, init_losses, lossMSL1, init_metrics, lossEdgeRing, vgg_scale
 from models.model_builder import init_optimizers, init_nets, save_checkpoint, setup_model, forward_pass
 from utils.utils import to_unit, set_seed, get_device, print_device, make_run_directory, half_precision, \
-    full_precision, get_schedule, set_logger, is_cuda, clamp_f32, to_u8
+    full_precision, get_schedule, set_logger, is_cuda, clamp_f32, to_u8, freeze_rng, restore_rng
 from dataset import prepare_dataset, prepare_batch
 from utils.vision_utils import crop_local_patch, plot_loss, set_fixed, save_images, sample_offset
 
@@ -192,7 +192,7 @@ def main():
                 losses["l1"] = lossMSL1(image, fake, mask_hole)
 
                 # Edge loss
-                losses["edge"] = lossEdge(image, fake)
+                losses["edge"] = lossEdgeRing(image, fake, mask_hole)
 
             # Style & Perceptual loss (no amp to avoid NaN, only full scale)
             with full_precision():
@@ -200,6 +200,9 @@ def main():
                 orig_full = clamp_f32(image)
                 sl = lossStyle(orig_full, comp_full)
                 pl = lossPerceptual(orig_full, comp_full)
+            scale = vgg_scale(mask_hole)
+            sl *= scale
+            pl *= scale
             losses["style"] = sl
             losses["perceptual"] = pl
 
@@ -300,6 +303,9 @@ def main():
         # Set validation mode
         netG.eval(); globalD.eval(); localD.eval()
 
+        # Freeze random number generator for deterministic validation
+        r, n, t, c = freeze_rng(VAL_SEED)
+
         with torch.no_grad():
             ssim_tot, lpips_tot = 0.0, 0.0
             l1_tot, edge_tot, style_tot, perc_tot = 0.0, 0.0, 0.0, 0.0
@@ -325,7 +331,7 @@ def main():
                     l1_loss = lossMSL1(image, fake, mask_hole)
 
                     # Edge loss
-                    edge_loss = lossEdge(image, fake)
+                    edge_loss = lossEdgeRing(image, fake, mask_hole)
 
                 # Style & Perceptual loss (no amp to avoid NaN, only full scale)
                 with full_precision():
@@ -334,11 +340,17 @@ def main():
                     vsl = lossStyle(orig_full, comp_full)
                     vpl = lossPerceptual(orig_full, comp_full)
 
+                scale = vgg_scale(mask_hole)
+                vsl *= scale
+                vpl *= scale
                 # Loss totals for averaging
                 l1_tot += l1_loss.item()
                 edge_tot += edge_loss.item()
                 style_tot += vsl.item()
                 perc_tot += vpl.item()
+
+        # Continue with saved random state
+        restore_rng(r, n, t, c)
 
         # -----------------------------------------------------------------------
         # Validation logging
@@ -350,9 +362,9 @@ def main():
 
         val_g = (
             L1_LAMBDA * avg_l1 +
-            edge_lambda * avg_edge +
-            style_lambda * avg_style +
-            perc_lambda * avg_perc
+            VAL_EDGE_LAMBDA * avg_edge +
+            VAL_STYLE_LAMBDA * avg_style +
+            VAL_PERCEPTUAL_LAMBDA * avg_perc
         )
 
         avg_val_ssim = ssim_tot / val_batches

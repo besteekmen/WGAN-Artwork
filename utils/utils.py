@@ -6,13 +6,9 @@ import sys
 import random
 import numpy as np
 import torch
-import torch.nn.functional as F
 from torch import amp
 from config import *
 
-# ---------------------------------------------------------------------------
-# Setup functions
-# ---------------------------------------------------------------------------
 def is_cuda():
     """Check cuda based on settings and availability."""
     return CUDA and torch.cuda.is_available()
@@ -50,6 +46,28 @@ def set_seed(seed=SEED):
     torch.manual_seed(seed_val)
     if is_cuda():
         torch.cuda.manual_seed(seed_val)
+
+def freeze_rng(seed=None):
+    """Freeze the random number generator and sets the seed to given value."""
+    r = random.getstate()
+    n = np.random.get_state()
+    t = torch.get_rng_state()
+    c = torch.cuda.get_rng_state() if is_cuda() else None
+
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if is_cuda():
+        torch.cuda.manual_seed_all(seed)
+    return r, n, t, c
+
+def restore_rng(r, n, t, c):
+    """Restore random number generator with given states."""
+    random.setstate(r)
+    np.random.set_state(n)
+    torch.set_rng_state(t)
+    if is_cuda() and c is not None:
+        torch.cuda.set_rng_state(c)
 
 def get_schedule(epoch: int, schedule):
     """Get the scheduled scale from the given epoch and schedule."""

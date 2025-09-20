@@ -4,7 +4,7 @@ import numpy as np
 import torch
 import cv2
 
-from PIL import Image
+from PIL import Image, ImageOps
 from torch.utils.data import Dataset
 from torchvision import transforms
 from torchvision.transforms.v2 import FiveCrop, RandomCrop
@@ -192,10 +192,101 @@ def prepare_batch(batch, device, irr_ratio: float | None = None,
     mask_hole = (1.0 - mask).float()  # (1=hole, 0=known)
     return image, mask_hole
 
-def get_crops(source_dir, crop_size=CROP_SIZE, crops_per_image=3, seed=SEED):
-    """Cuts specified number of crops from the images in given directory."""
+def random_select(source_dir, count, size=CROP_SIZE, seed=SEED):
+    """Select given count of images from a source directory randomly."""
+    rand = random.Random(seed)
+    image_ext = {'.jpg', '.jpeg', '.png'}
+    base = os.path.basename(source_dir)
+    images = []
 
-def preextract_randomcrops(source_dir, target_dir, crop_size=LOCAL_PATCH_SIZE, crops_per_image=3):
+    for image in tqdm(os.scandir(source_dir), desc=f"Scanning {base}", leave=False):
+        if not image.is_file():
+            continue
+        ext = os.path.splitext(image.name)[1].lower()
+        if ext not in image_ext:
+            continue
+        try:
+            with Image.open(image.path) as img:
+                img = ImageOps.exif_transpose(img)
+                width, height = img.size
+
+            # Skip small images
+            if width < size or height < size:
+                print(f"Skipping small image ({width}x{height}): ({image.path}).")
+            else:
+                images.append(image.path)
+        except Exception as e:
+            print(f"Failed processing ({image.path}): {e}.")
+
+    rand.shuffle(images)
+    if len(images) < count:
+        print(f"[WARN] Category {base}: requested ({count}), available ({len(images)}).")
+    return images[:min(count, len(images))]
+
+def get_crops(image_paths, crop_size=CROP_SIZE, crops_per_image=3):
+    """Cuts specified number of crops from the images in given directory."""
+    cropper = RandomCrop(crop_size) # change here for reproducible crops
+    crops = []
+    for image_path in image_paths:
+        try:
+            with Image.open(image_path) as img:
+                img = ImageOps.exif_transpose(img).convert('RGB')
+                width, height = img.size
+
+                # Skip small images
+                if width < crop_size or height < crop_size:
+                    print(f"Skipping small image ({width}x{height}): ({image_path}).")
+                    continue
+
+                base = os.path.splitext(os.path.basename(image_path))[0]
+                for i in range(crops_per_image):
+                    crop = cropper(img)
+                    crops.append((crop, base, i))
+
+        except Exception as e:
+            print(f"Failed processing ({image_path}): {e}.")
+    return crops
+
+def split_dataset(images, source_dir, target_dir,
+                  category, ratios=(0.8, 0.1, 0.1), seed=SEED):
+    """
+    Split all images in the source into train/val/test subfolders
+    source_dir (str): Folder containing all crop images
+    target_dir (str): Folder where to save the split data
+    ratios (tuple): List of ratios to split the dataset (must sum to 1)
+    category (str): Name of category
+    seed (int): Random seed
+    """
+    assert abs(sum(ratios)) <= 1, f"ratios must sum to 1, got {sum(ratios)}"
+    if not images:
+        return 0, 0, 0
+
+
+
+    all_crops = [os.path.join(source, f) for f in os.listdir(source)]
+    random.seed(seed)
+    random.shuffle(all_crops)
+
+    n = len(all_crops)
+    n_train = int(n * ratios[0])
+    n_val = int(n * ratios[1])
+
+    splits = {
+        'train': all_crops[:n_train],
+        'val': all_crops[n_train:n_train+n_val],
+        'test': all_crops[n_train+n_val:]
+    }
+
+    for split, files in splits.items():
+        split_dir = os.path.join(target, split)
+        os.makedirs(split_dir, exist_ok=True)
+        for f in tqdm(files, desc=f"Moving {split}"):
+            shutil.move(f, os.path.join(split_dir, os.path.basename(f)))
+
+    print(f"Done! Train={len(splits['train'])} Val={len(splits['val'])} Test={len(splits['test'])}")
+
+
+def preextract_randomcrops(source_dir, target_dir, crop_size=CROP_SIZE, crops_per_image=3):
     """
     Extract a specified number of fixed size crops (all located randomly) from each image,
     then save them all as separate images.

@@ -79,7 +79,8 @@ class CoarseGenerator(nn.Module):
             nn.ReLU(inplace=True),
             # 8th layer
             nn.ConvTranspose2d(G_HIDDEN * 2, G_HIDDEN, 4, stride=2, padding=1),
-            nn.InstanceNorm2d(G_HIDDEN, affine=True),  # --> replaced BatchNorm2d
+            #nn.InstanceNorm2d(G_HIDDEN, affine=True),  # --> replaced BatchNorm2d
+            nn.Identity(), # preserve local color/texture and reduce hallucination?
             nn.ReLU(inplace=True),
             # 9th layer (to RGB)
             nn.Conv2d(G_HIDDEN,3, 3, padding=1),
@@ -141,7 +142,8 @@ class FineGenerator(nn.Module):
             nn.ReLU(inplace=True),
             # 8th layer
             nn.ConvTranspose2d(G_HIDDEN * 2, G_HIDDEN, 4, stride=2, padding=1),
-            nn.InstanceNorm2d(G_HIDDEN, affine=True), # keep one norm for stability
+            #nn.InstanceNorm2d(G_HIDDEN, affine=True), # keep one norm for stability
+            nn.Identity(),
             nn.ReLU(inplace=True),
             # 9th layer (to RGB)
             nn.Conv2d(G_HIDDEN, 3, 3, padding=1),

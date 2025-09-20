@@ -162,6 +162,14 @@ def gradient_penalty(critic, real, fake, device):
     grad_norm = torch.clamp(gradients.norm(2, dim=1), 0, 10) + 1e-8 # stabilizer and clamp added to avoid NaN g loss
     return ((grad_norm - 1) ** 2).mean()
 
+def masked_l1(x, y, mask):
+    diff = (x - y).abs()
+    # normalize by mask area for stability (mask size invariant, per pixel error)
+    # [B, 1, H, W] -> [B, 1*H*W] -> [B] by flatten and sum -> scalar by mean
+    num = (diff * mask).flatten(1).sum(1)
+    denom = mask.flatten(1).sum(1) + 1e-6
+    return (num / denom).mean()
+
 def lossMSL1(real, fake, mask):
     """Calculate multiscale loss for a given loss function.
 
@@ -180,8 +188,9 @@ def lossMSL1(real, fake, mask):
     f_scale = downsample(fake, SCALES)
     m_scale = downsample(mask, SCALES)
     for ors, fs, ms in zip(r_scale, f_scale, m_scale):
-        multi_loss += HOLE_LAMBDA * F.l1_loss(fs * ms, ors * ms) + \
-                      VALID_LAMBDA * F.l1_loss(fs * (1.0 - ms), ors * (1.0 - ms))
+        hole = masked_l1(fs, ors, ms)
+        valid = masked_l1(fs, ors, 1.0 - ms)
+        multi_loss += HOLE_LAMBDA * hole + VALID_LAMBDA * valid
     return multi_loss / len(SCALES)
 
 def sobel(x):
@@ -189,15 +198,43 @@ def sobel(x):
     x_gray = x.mean(dim=1, keepdim=True) # convert [B, 3, H, W] in [-1, 1] to grayscale
     sobel_x = torch.tensor(
         [[1, 0, -1], [2, 0, -2], [1, 0, -1]],
-        dtype=torch.float32,
+        dtype=x.dtype,
         device=x.device).unsqueeze(0).unsqueeze(0)
     sobel_y = torch.tensor(
         [[1, 2, 1], [0, 0, 0], [-1, -2, -1]],
-        dtype=torch.float32,
+        dtype=x.dtype,
         device=x.device).unsqueeze(0).unsqueeze(0)
     grad_x = F.conv2d(x_gray, sobel_x, padding=1)
     grad_y = F.conv2d(x_gray, sobel_y, padding=1)
-    return torch.sqrt(grad_x ** 2 + grad_y ** 2 + 1e-6) # added epsilon to avoid NaN grads
+    return torch.sqrt(grad_x.float() ** 2 + grad_y.float() ** 2 + 1e-6).to(x.dtype) # added epsilon to avoid NaN grads
+
+def dilation(x, size=3):
+    # x = [B, 1, H, W] in [0, 1] i.e. mask_hole so mask 1, rest 0
+    return F.max_pool2d(x, kernel_size=(2 * size + 1), stride=1, padding=size)
+
+def erosion(x, size=3):
+    return 1.0 - F.max_pool2d(1.0 - x, kernel_size=(2 * size + 1), stride=1, padding=size)
+
+def get_ring(x, size=3):
+    dil = dilation(x, size)
+    er = erosion(x, size)
+    ring = {
+        "inner": torch.clamp(x - er, 0.0, 1.0),
+        "outer": torch.clamp(dil - x, 0.0, 1.0),
+        "both": torch.clamp(dil - er, 0.0, 1.0)
+    }
+    return ring
 
 def lossEdge(real, fake):
-    return F.l1_loss(sobel(real), sobel(fake)) # use functional l1, not class one
+    return F.l1_loss(sobel(fake), sobel(real), reduction="mean") # use functional l1, not class one
+
+def lossEdgeRing(real, fake, mask_hole, size=3, ring_type="outer"):
+    ring = get_ring(mask_hole, size)[ring_type].to(fake.dtype).float()
+    return masked_l1(sobel(fake), sobel(real), ring)
+
+def vgg_scale(mask):
+    B, C, H, W = mask.size()
+    total = float(H * W)
+    active = mask.sum(dim=(1, 2, 3)).mean()
+    return total / (active + 1e-6)
+
