@@ -79,7 +79,7 @@ def main():
     logger.info("Starting training...")
     global_step = 0
     start_time = datetime.now()
-    tolerance = 5
+    tolerance = TOL
     best_fid = float("inf")
     early_stopping = False
 
@@ -189,10 +189,10 @@ def main():
                 losses["adv"] = adv_global + adv_local
 
                 # Pixel-wise L1 loss (multiscale, under amp)
-                losses["l1"] = lossMSL1(image, fake, mask_hole)
+                losses["l1"] = lossMSL1(image, composite, mask_hole)
 
                 # Edge loss
-                losses["edge"] = lossEdgeRing(image, fake, mask_hole)
+                losses["edge"] = lossEdgeRing(image, composite, mask_hole)
 
             # Style & Perceptual loss (no amp to avoid NaN, only full scale)
             with full_precision():
@@ -200,7 +200,7 @@ def main():
                 orig_full = clamp_f32(image)
                 sl = lossStyle(orig_full, comp_full)
                 pl = lossPerceptual(orig_full, comp_full)
-            scale = vgg_scale(mask_hole).detach()
+            scale = torch.clamp(vgg_scale(mask_hole), 1.0, 4.0)
             sl *= scale
             pl *= scale
             losses["style"] = sl
@@ -328,10 +328,10 @@ def main():
 
                 with half_precision(): # no adv loss for validation!
                     # Pixel-wise L1 loss (multiscale, under amp)
-                    l1_loss = lossMSL1(image, fake, mask_hole)
+                    l1_loss = lossMSL1(image, composite, mask_hole)
 
                     # Edge loss
-                    edge_loss = lossEdgeRing(image, fake, mask_hole)
+                    edge_loss = lossEdgeRing(image, composite, mask_hole)
 
                 # Style & Perceptual loss (no amp to avoid NaN, only full scale)
                 with full_precision():
@@ -340,7 +340,7 @@ def main():
                     vsl = lossStyle(orig_full, comp_full)
                     vpl = lossPerceptual(orig_full, comp_full)
 
-                scale = vgg_scale(mask_hole)
+                scale = torch.clamp(vgg_scale(mask_hole), 1.0, 4.0)
                 vsl *= scale
                 vpl *= scale
                 # Loss totals for averaging

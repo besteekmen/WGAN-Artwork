@@ -2,6 +2,12 @@
 SEED = 42
 VAL_SEED = 1234
 
+# --- Global helpers ---
+EPS = 1e-8 # Epsilon for safe mathematical operations
+TOL = 5 # Tolerance for early stopping
+SAVE_FREQ = 200
+CHECKPOINT_EVERY = 1 # Frequency of model saving
+
 # --- Training settings ---
 BATCH_SIZE = 16 # reduced from 128 to avoid OOM
 # BATCH_SIZE has a major impact on how much GPU memory the code will consume!
@@ -23,8 +29,6 @@ EPOCH_NUM = 50
 LR_G = 1e-4 # generator learning rate, change to 1e-4 if NaN g loss
 LR_D = 8e-5 # discriminator learning rate, was also 1e-4, reduced for G to sharpen details
 OPTIM_BETAS = (0.0, 0.9)
-SAVE_FREQ = 200
-CHECKPOINT_EVERY = 1 # Frequency of model saving
 
 # --- Model hyperparameters ---
 IS_GATED = True # toggle between gated and standard convolutions in the fine stage
@@ -46,41 +50,37 @@ IRR_RATIO_SCHEDULE = [ # irregular masks ratio was constant at 0.3 before
 ]
 
 # --- Loss weights (similar to Contextual Attention Yu et al 2018) ---
-HOLE_LAMBDA = 4.0 # full weight for missing region, reduced from 6.0 to avoid large gradients
-VALID_LAMBDA = 1.0 # smaller for known region (was 0.1)
-L1_LAMBDA = 1.0 # was 10.0 reconstruction loss weight
+HOLE_LAMBDA = 6.0 # 4.0 # full weight for missing region, reduced from 6.0 to avoid large gradients
+VALID_LAMBDA = 0.2 # 1.0 # smaller for known region (was 0.1)
+L1_LAMBDA = 0.5 #1.0 # was 10.0 reconstruction loss weight
 EDGE_LAMBDA_SCHEDULE = [ # was constant before as EDGE_LAMBDA = 0.05
-    (0, 0.0),
-    (10, 0.015),
-    (20, 0.024),
-    (30, 0.03)
+    (0, 0.04),
+    (10, 0.05),
+    (20, 0.06)
 ]
-VAL_EDGE_LAMBDA = 0.0
+VAL_EDGE_LAMBDA = 0.05
 STYLE_LAMBDA_SCHEDULE = [ # was constant before as STYLE_LAMBDA = 60.0
-    (0, 18.0),
-    (10, 36.0),
-    (20, 48.0),
-    (30, 60.0)
+    (0, 24.0),
+    (5, 36.0),
+    (10, 48.0),
+    (20, 60.0)
 ]
 VAL_STYLE_LAMBDA = 48 #60.0
 ADV_LAMBDA_SCHEDULE = [ # was constant before as ADV_LAMBDA = 0.005
-    (0, 0.005)
-    #(35, 0.0075)
-    #(30, 0.0075)
-    #(40, 0.01)
+    (0, 0.008),
+    (3, 0.01),
+    (10, 0.012)
 ]
 PERCEPTUAL_LAMBDA_SCHEDULE = [ # was constant before as PERCEPTUAL_LAMBDA = 0.1
-    (0, 0.1),
-    (25, 0.085),
-    (35, 0.08)
-    #(25, 0.075),
-    #(35, 0.05)
+    (0, 0.05),
+    (5, 0.08),
+    (15, 0.1)
 ]
-VAL_PERCEPTUAL_LAMBDA = 0.05
+VAL_PERCEPTUAL_LAMBDA = 0.06
 ADV_LAMBDA = 0.005 # small weight for adversarial loss (for stable training)
 PERCEPTUAL_LAMBDA = 0.1 # Reduced from 0.05 for smoother early training
 # If textures too blurry, try 0.1
-GP_LAMBDA = 20.0 # WGAN-GP penalty weight
+GP_LAMBDA = 10.0 # WGAN-GP penalty weight
 SCALES = [1.0, 0.5, 0.25] # multiscale factors
 SCALE_WEIGHTS = [1.0, 0.5, 0.25] # multiscale factor weights
 

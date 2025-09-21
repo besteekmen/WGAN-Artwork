@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torchvision.models as tvmodels
 
-from config import SCALES, HOLE_LAMBDA, VALID_LAMBDA
+from config import SCALES, HOLE_LAMBDA, VALID_LAMBDA, EPS
 from utils.utils import get_device
 from torchmetrics.image.ssim import StructuralSimilarityIndexMeasure
 from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
@@ -60,7 +60,7 @@ class VGG19StyleLoss(nn.Module):
         """
         B, C, H, W = features.size()
         feats = features.view(B, C, H * W)
-        denominator = (C * H * W) + 1e-8
+        denominator = (C * H * W) + EPS
         return torch.bmm(feats, feats.transpose(1, 2)) / denominator
 
     def forward(self, real, fake):
@@ -159,7 +159,7 @@ def gradient_penalty(critic, real, fake, device):
     )[0]
 
     gradients = gradients.view(B, -1)
-    grad_norm = torch.clamp(gradients.norm(2, dim=1), 0, 10) + 1e-8 # stabilizer and clamp added to avoid NaN g loss
+    grad_norm = torch.clamp(gradients.norm(2, dim=1), 0, 10) + EPS # stabilizer and clamp added to avoid NaN g loss
     return ((grad_norm - 1) ** 2).mean()
 
 def masked_l1(x, y, mask):
@@ -167,7 +167,7 @@ def masked_l1(x, y, mask):
     # normalize by mask area for stability (mask size invariant, per pixel error)
     # [B, 1, H, W] -> [B, 1*H*W] -> [B] by flatten and sum -> scalar by mean
     num = (diff * mask).flatten(1).sum(1)
-    denom = mask.flatten(1).sum(1) + 1e-6
+    denom = torch.clamp(mask.flatten(1).sum(1) + EPS, min=1.0)
     return (num / denom).mean()
 
 def lossMSL1(real, fake, mask):
@@ -206,7 +206,7 @@ def sobel(x):
         device=x.device).unsqueeze(0).unsqueeze(0)
     grad_x = F.conv2d(x_gray, sobel_x, padding=1)
     grad_y = F.conv2d(x_gray, sobel_y, padding=1)
-    return torch.sqrt(grad_x.float() ** 2 + grad_y.float() ** 2 + 1e-6).to(x.dtype) # added epsilon to avoid NaN grads
+    return torch.sqrt(grad_x.float() ** 2 + grad_y.float() ** 2 + EPS).to(x.dtype) # added epsilon to avoid NaN grads
 
 def dilation(x, size=3):
     # x = [B, 1, H, W] in [0, 1] i.e. mask_hole so mask 1, rest 0
@@ -236,5 +236,5 @@ def vgg_scale(mask):
     B, C, H, W = mask.size()
     total = float(H * W)
     active = mask.sum(dim=(1, 2, 3)).mean()
-    return total / (active + 1e-6)
+    return torch.clamp(total / (active + EPS), max=8.0)
 
