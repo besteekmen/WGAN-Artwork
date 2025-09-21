@@ -4,7 +4,7 @@ import torch
 from torch import optim
 from models.generator import Generator
 from models.discriminator import GlobalDiscriminator, LocalDiscriminator
-from models.weights_init import weights_init_normal
+from models.weights_init import weights_init_normal, bias_init_gate
 from utils.utils import get_device
 from config import *
 
@@ -38,6 +38,7 @@ def init_model(netG, globalD, localD, optimG, optimGD, optimLD):
     """Initialize the model with new weights."""
     netG.apply(weights_init_normal)
     netG.upsample_init()  # used to avoid initial patchy results
+    netG.apply(bias_init_gate) # start gates open for better detail flow
     # print(netG) # DEBUG only: causes repetitive printing
     globalD.apply(weights_init_normal)
     localD.apply(weights_init_normal)

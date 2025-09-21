@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torchvision.models as tvmodels
 
-from config import SCALES, HOLE_LAMBDA, VALID_LAMBDA, EPS
+from config import SCALES, HOLE_LAMBDA, VALID_LAMBDA, EPS, EDGE_RING
 from utils.utils import get_device
 from torchmetrics.image.ssim import StructuralSimilarityIndexMeasure
 from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
@@ -228,7 +228,7 @@ def get_ring(x, size=3):
 def lossEdge(real, fake):
     return F.l1_loss(sobel(fake), sobel(real), reduction="mean") # use functional l1, not class one
 
-def lossEdgeRing(real, fake, mask_hole, size=3, ring_type="outer"):
+def lossEdgeRing(real, fake, mask_hole, size=EDGE_RING, ring_type="outer"):
     ring = get_ring(mask_hole, size)[ring_type].to(fake.dtype).float()
     return masked_l1(sobel(fake), sobel(real), ring)
 

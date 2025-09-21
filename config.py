@@ -49,10 +49,11 @@ IRR_RATIO_SCHEDULE = [ # irregular masks ratio was constant at 0.3 before
     (35, 0.50)
 ]
 
-# --- Loss weights (similar to Contextual Attention Yu et al 2018) ---
+# --- Loss weights and hyperparameters ---
 HOLE_LAMBDA = 6.0 # 4.0 # full weight for missing region, reduced from 6.0 to avoid large gradients
 VALID_LAMBDA = 0.2 # 1.0 # smaller for known region (was 0.1)
 L1_LAMBDA = 0.5 #1.0 # was 10.0 reconstruction loss weight
+LPIPS_LAMBDA = 0.1 # 0.05 or 0.15 later
 EDGE_LAMBDA_SCHEDULE = [ # was constant before as EDGE_LAMBDA = 0.05
     (0, 0.04),
     (10, 0.05),
@@ -83,6 +84,7 @@ PERCEPTUAL_LAMBDA = 0.1 # Reduced from 0.05 for smoother early training
 GP_LAMBDA = 10.0 # WGAN-GP penalty weight
 SCALES = [1.0, 0.5, 0.25] # multiscale factors
 SCALE_WEIGHTS = [1.0, 0.5, 0.25] # multiscale factor weights
+EDGE_RING = 3
 
 # --- Datasets and paths ---
 OUT_PATH = 'out'

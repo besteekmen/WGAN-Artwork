@@ -38,3 +38,10 @@ def weights_init_upsample(weight: torch.Tensor, scale: int=2):
             weight.data[i * sub_channels:(i + 1) * sub_channels, :, :, :],
             nonlinearity='relu'
         )
+
+def bias_init_gate(m):
+    """Initialize gated convolution bias"""
+    if hasattr(m, 'gating_conv') and isinstance(m.gating_conv, nn.Conv2d):
+        if m.gating_conv.bias is not None:
+            #with torch.no_grad():
+            init.constant_(m.gating_conv.bias, 1.0)
