@@ -85,6 +85,7 @@ GP_LAMBDA = 10.0 # WGAN-GP penalty weight
 SCALES = [1.0, 0.5, 0.25] # multiscale factors
 SCALE_WEIGHTS = [1.0, 0.5, 0.25] # multiscale factor weights
 EDGE_RING = 3
+LPIPS_RING = 3
 
 # --- Datasets and paths ---
 OUT_PATH = 'out'

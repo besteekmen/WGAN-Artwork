@@ -44,7 +44,7 @@ def main():
     # To load a pretrained model, add file_name as parameter to setup_model
 
     # Init losses and quality metrics
-    lossStyle, lossPerceptual = init_losses()
+    lossStyle, lossPerceptual, lossLPIPS = init_losses()
     ssim, lpips, fid = init_metrics()
 
     # Set gradient scaler (mixed precision for faster training and low memory usage)
@@ -200,14 +200,16 @@ def main():
                 orig_full = clamp_f32(image)
                 sl = lossStyle(orig_full, comp_full)
                 pl = lossPerceptual(orig_full, comp_full)
+                lpipsl = lossLPIPS(orig_full, comp_full, mask_hole)
             scale = torch.clamp(vgg_scale(mask_hole), 1.0, 4.0)
             sl *= scale
             pl *= scale
             losses["style"] = sl
             losses["perceptual"] = pl
+            losses["lpips"] = lpipsl
 
             # DEBUG only: Check for loss values to find the cause of NaN
-            all_terms = [losses["adv"], losses["l1"], losses["edge"], sl, pl]
+            all_terms = [losses["adv"], losses["l1"], losses["edge"], sl, pl, lpipsl]
             with_nan = (not torch.isfinite(fake).all()) or (not all(torch.isfinite(x) for x in all_terms))
 
             if with_nan:
@@ -217,7 +219,8 @@ def main():
                                     f"l1={float(losses['l1']) if torch.isfinite(losses['l1']) else 'NaN'} "
                                     f"edge={float(losses['edge']) if torch.isfinite(losses['edge']) else 'NaN'} "
                                     f"style={float(losses['style']) if torch.isfinite(losses['style']) else 'NaN'} "
-                                    f"perceptual={float(losses['perceptual']) if torch.isfinite(losses['perceptual']) else 'NaN'}")
+                                    f"perceptual={float(losses['perceptual']) if torch.isfinite(losses['perceptual']) else 'NaN'}"
+                                    f"lpips={float(losses['lpips']) if torch.isfinite(losses['lpips']) else 'NaN'}")
                     train_tqdm.write(message_skip)
                     logger.info(message_skip)
                     nan_log_i = i
@@ -231,7 +234,8 @@ def main():
                                 L1_LAMBDA * losses["l1"] +
                                 edge_lambda * losses["edge"] +
                                 style_lambda * losses["style"] +
-                                perc_lambda * losses["perceptual"])
+                                perc_lambda * losses["perceptual"] +
+                                LPIPS_LAMBDA * losses["lpips"])
 
             g_tot += losses["totalG"].item()
             d_tot += losses["totalD"].item()
@@ -240,13 +244,14 @@ def main():
             num_batches += 1
 
             if i % SAVE_FREQ == 0:
-                raw = {k: float(losses[k]) for k in ["adv", "l1", "edge", "style", "perceptual"]}
+                raw = {k: float(losses[k]) for k in ["adv", "l1", "edge", "style", "perceptual", "lpips"]}
                 weighted = {
                     "adv_w": adv_lambda * raw["adv"],
                     "l1_w": L1_LAMBDA * raw["l1"],
                     "edge_w": edge_lambda * raw["edge"],
                     "style_w": style_lambda * raw["style"],
-                    "perceptual_w": perc_lambda * raw["perceptual"]
+                    "perceptual_w": perc_lambda * raw["perceptual"],
+                    "lpips_w": LPIPS_LAMBDA * raw["lpips"]
                 }
                 logger.info(f"[Debug] Raw: {raw} | Weighted: {weighted}")
 
@@ -307,8 +312,8 @@ def main():
         r, n, t, c = freeze_rng(VAL_SEED)
 
         with torch.no_grad():
-            ssim_tot, lpips_tot = 0.0, 0.0
-            l1_tot, edge_tot, style_tot, perc_tot = 0.0, 0.0, 0.0, 0.0
+            ssim_met_tot, lpips_met_tot = 0.0, 0.0
+            l1_tot, edge_tot, style_tot, perc_tot, lpips_tot = 0.0, 0.0, 0.0, 0.0, 0.0
             val_batches = 0
 
             for image, mask in val_loader:
@@ -322,8 +327,8 @@ def main():
                 # Compute square mask metrics
                 unit_image = to_unit(image)
                 unit_comp = to_unit(composite)
-                ssim_tot += ssim(unit_comp, unit_image).item()
-                lpips_tot += lpips(unit_comp, unit_image).item()
+                ssim_met_tot += ssim(unit_comp, unit_image).item()
+                lpips_met_tot += lpips(unit_comp, unit_image).item()
                 val_batches += 1
 
                 with half_precision(): # no adv loss for validation!
@@ -339,6 +344,7 @@ def main():
                     orig_full = clamp_f32(image)
                     vsl = lossStyle(orig_full, comp_full)
                     vpl = lossPerceptual(orig_full, comp_full)
+                    vlpipsl = lossLPIPS(orig_full, comp_full, mask_hole)
 
                 scale = torch.clamp(vgg_scale(mask_hole), 1.0, 4.0)
                 vsl *= scale
@@ -348,6 +354,7 @@ def main():
                 edge_tot += edge_loss.item()
                 style_tot += vsl.item()
                 perc_tot += vpl.item()
+                lpips_tot += vlpipsl.item()
 
         # Continue with saved random state
         restore_rng(r, n, t, c)
@@ -359,16 +366,18 @@ def main():
         avg_edge = edge_tot / val_batches
         avg_style = style_tot / val_batches
         avg_perc = perc_tot / val_batches
+        avg_lpips = lpips_tot / val_batches
 
         val_g = (
             L1_LAMBDA * avg_l1 +
             VAL_EDGE_LAMBDA * avg_edge +
             VAL_STYLE_LAMBDA * avg_style +
-            VAL_PERCEPTUAL_LAMBDA * avg_perc
+            VAL_PERCEPTUAL_LAMBDA * avg_perc +
+            LPIPS_LAMBDA * avg_lpips
         )
 
-        avg_val_ssim = ssim_tot / val_batches
-        avg_val_lpips = lpips_tot / val_batches
+        avg_val_ssim = ssim_met_tot / val_batches
+        avg_val_lpips = lpips_met_tot / val_batches
         elog["valG"].append(val_g)
 
         logger.info( # Validation logs
@@ -377,7 +386,8 @@ def main():
             f"L1={avg_l1:.4f}, "
             f"Edge={avg_edge:.4f}, "
             f"Style={avg_style:.4f}, "
-            f"Perc={avg_perc:.4f} | "
+            f"Perc={avg_perc:.4f}, "
+            f"Lpips={avg_lpips:.4f} | "
             f"SSIM={avg_val_ssim:.4f}, "
             f"LPIPS={avg_val_lpips:.4f}"
         )
