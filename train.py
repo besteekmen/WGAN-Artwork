@@ -204,6 +204,7 @@ def main():
             scale = torch.clamp(vgg_scale(mask_hole), 1.0, 4.0)
             sl *= scale
             pl *= scale
+            lpipsl *= scale
             losses["style"] = sl
             losses["perceptual"] = pl
             losses["lpips"] = lpipsl
@@ -349,6 +350,7 @@ def main():
                 scale = torch.clamp(vgg_scale(mask_hole), 1.0, 4.0)
                 vsl *= scale
                 vpl *= scale
+                vlpipsl *= scale
                 # Loss totals for averaging
                 l1_tot += l1_loss.item()
                 edge_tot += edge_loss.item()

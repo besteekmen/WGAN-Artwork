@@ -141,7 +141,7 @@ class VGGLPIPSLoss(nn.Module):
     """Compute LPIPS on a ring around the boundary (frozen).
     Attributes:
     """
-    def __init__(self, ring_type="both", size=LPIPS_RING):
+    def __init__(self, ring_type="outer", size=LPIPS_RING):
         super().__init__()
         lpips = LearnedPerceptualImagePatchSimilarity(net_type="vgg").eval()
         for param in lpips.parameters():
