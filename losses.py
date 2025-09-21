@@ -261,5 +261,5 @@ def vgg_scale(mask):
     B, C, H, W = mask.size()
     total = float(H * W)
     active = mask.sum(dim=(1, 2, 3)).mean()
-    return torch.clamp(total / (active + EPS), max=8.0)
+    return torch.clamp(total / (active + EPS), max=2.0)
 
