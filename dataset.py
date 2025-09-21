@@ -7,10 +7,12 @@ import cv2
 from PIL import Image, ImageOps
 from torch.utils.data import Dataset
 from torchvision import transforms
-from torchvision.transforms.v2 import FiveCrop, RandomCrop
+from torchvision.transforms.v2 import RandomCrop
+from torchvision.transforms import InterpolationMode
+from torchvision.transforms.functional import rotate
 from tqdm import tqdm
-from utils.utils import clear_folder, is_cuda, get_device
-from config import LOCAL_PATCH_SIZE, DATA_PATH, BATCH_SIZE, NUM_WORKERS, CROP_SIZE, SEED
+from utils.utils import is_cuda, clear_folder
+from config import DATA_PATH, BATCH_SIZE, NUM_WORKERS, CROP_SIZE, SEED, EPS
 
 
 class CroppedImageDataset(Dataset):
@@ -77,22 +79,19 @@ class CroppedImageDataset(Dataset):
         """
         Scans directory for cropped images.
         """
-        # TODO: add image extension check later!
-        #image_ext = {'.jpg', '.jpeg', '.png'}
         all_crops = []
         print(f"Scanning for crops in: {root_dir} ...")
 
         for root, _, files in os.walk(root_dir):
             for filename in tqdm(files, desc=f"Scanning {os.path.basename(root)}", leave=False):
-                ext = os.path.splitext(filename)[1].lower()
-                #if ext in image_ext and '_crop' in filename:
                 if '_crop' in filename:
                     all_crops.append(os.path.join(root, filename))
 
         print(f"Found {len(all_crops)} crop images.")
         return all_crops
 
-def generate_square_mask(height, width, rand=None):
+def generate_square_mask(height, width, rand=None,
+                         p_rotate = 0.5, max_angle = 30.0):
     """Create a random size and random location square mask."""
     rand = rand or random
     # %60 small/medium and %40 large
@@ -100,11 +99,23 @@ def generate_square_mask(height, width, rand=None):
         low, high = min(height, width) // 6, min(height, width) // 3
     else:
         low, high = min(height, width) // 3, min(height, width) // 2
+
     block_size = rand.randint(low, high)
     top = rand.randint(0, height - block_size)
     left = rand.randint(0, width - block_size)
+
     mask = torch.ones(1, height, width, dtype=torch.float32)  # [1, H, W]
     mask[:, top:top + block_size, left:left + block_size] = 0  # (1 = known, 0 = hole)
+
+    if rand.random() < p_rotate:
+        angle = rand.uniform(-max_angle, max_angle)
+        mask = rotate(
+            mask,
+            angle,
+            interpolation=InterpolationMode.NEAREST,
+            fill=[1.0]
+        )
+        mask = (mask > 0.5).float()
     return mask
 
 def generate_irregular_mask(height, width, brush_width=(7, 25),
@@ -247,44 +258,65 @@ def get_crops(image_paths, crop_size=CROP_SIZE, crops_per_image=3):
             print(f"Failed processing ({image_path}): {e}.")
     return crops
 
-def split_dataset(images, source_dir, target_dir,
-                  category, ratios=(0.8, 0.1, 0.1), seed=SEED):
+def split_data(images, target_dir,
+               ratios=(0.8, 0.1, 0.1), prefix=""):
     """
-    Split all images in the source into train/val/test subfolders
-    source_dir (str): Folder containing all crop images
+    Split a list of images into train/val/test and save them.
+    images (list): List of tuples (image, base, index)
     target_dir (str): Folder where to save the split data
-    ratios (tuple): List of ratios to split the dataset (must sum to 1)
-    category (str): Name of category
+    ratios (tuple): Ratios to split data into
     seed (int): Random seed
+    prefix (str): Identifier for filenames
     """
-    assert abs(sum(ratios)) <= 1, f"ratios must sum to 1, got {sum(ratios)}"
+    assert abs(sum(ratios) - 1.0) < EPS, f"ratios must sum to 1, got {sum(ratios)}"
     if not images:
         return 0, 0, 0
 
+    for split in ("train", "val", "test"):
+        out_dir = os.path.join(target_dir, split)
+        if not os.path.exists(out_dir):
+            raise FileNotFoundError(f"{out_dir} does not exist.")
 
-
-    all_crops = [os.path.join(source, f) for f in os.listdir(source)]
-    random.seed(seed)
-    random.shuffle(all_crops)
-
-    n = len(all_crops)
+    # no need for randomization here, done in random_select
+    n = len(images)
     n_train = int(n * ratios[0])
     n_val = int(n * ratios[1])
 
     splits = {
-        'train': all_crops[:n_train],
-        'val': all_crops[n_train:n_train+n_val],
-        'test': all_crops[n_train+n_val:]
+        'train': images[:n_train],
+        'val': images[n_train:n_train + n_val],
+        'test': images[n_train + n_val:]
     }
 
+    pfx = (prefix + "_") if prefix else ""
+    counts = {"train": 0, "val": 0, "test": 0}
+
     for split, files in splits.items():
-        split_dir = os.path.join(target, split)
-        os.makedirs(split_dir, exist_ok=True)
-        for f in tqdm(files, desc=f"Moving {split}"):
-            shutil.move(f, os.path.join(split_dir, os.path.basename(f)))
+        split_dir = os.path.join(target_dir, split)
+        for img, base, i in tqdm(files, desc=f"Saving {split}", leave=False):
+            out_name = f"{pfx}{base}_crop{i}.png"
+            img.convert("RGB").save(os.path.join(split_dir, out_name))
+            counts[split] += 1
 
-    print(f"Done! Train={len(splits['train'])} Val={len(splits['val'])} Test={len(splits['test'])}")
+    print(f"Done! Train={counts['train']} Val={counts['val']} Test={counts['test']}")
+    return counts["train"], counts["val"], counts["test"]
 
+def prepare_data(source_dir, target_dir,
+                 cat_counts, crop_size=CROP_SIZE, crops_per_image=3,
+                 ratios=(0.8, 0.1, 0.1), seed=SEED):
+    source_root = source_dir
+    for split in ("train", "val", "test"):
+        clear_folder(os.path.join(target_dir, split))
+
+    summary = {}
+    for style, n in cat_counts.items():
+        source = os.path.join(source_root, style)
+        selected = random_select(source, n, size=crop_size, seed=seed)
+        crops = get_crops(selected, crop_size=crop_size, crops_per_image=crops_per_image)
+        n_train, n_val, n_test = split_data(crops, target_dir, ratios=ratios, prefix=style)
+        summary[style] = (n_train, n_val, n_test)
+        print(f"[{style}]: Train={n_train} Val={n_val} Test={n_test}")
+    return summary
 
 def preextract_randomcrops(source_dir, target_dir, crop_size=CROP_SIZE, crops_per_image=3):
     """
