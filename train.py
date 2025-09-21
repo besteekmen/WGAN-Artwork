@@ -44,8 +44,8 @@ def main():
     # To load a pretrained model, add file_name as parameter to setup_model
 
     # Init losses and quality metrics
-    lossStyle, lossPerceptual, lossLPIPS = init_losses()
-    ssim, lpips, fid = init_metrics()
+    lossStyle, lossPerceptual, lossLPIPS = init_losses(device)
+    ssim, lpips, fid = init_metrics(device)
 
     # Set gradient scaler (mixed precision for faster training and low memory usage)
     scalerG = amp.GradScaler(enabled=is_cuda())
@@ -200,17 +200,17 @@ def main():
                 orig_full = clamp_f32(image)
                 sl = lossStyle(orig_full, comp_full)
                 pl = lossPerceptual(orig_full, comp_full)
-                lpipsl = lossLPIPS(orig_full, comp_full, mask_hole)
+                #lpipsl = lossLPIPS(orig_full, comp_full, mask_hole)
             scale = torch.clamp(vgg_scale(mask_hole), 1.0, 4.0)
             sl *= scale
             pl *= scale
-            lpipsl *= scale
+            #lpipsl *= scale
             losses["style"] = sl
             losses["perceptual"] = pl
-            losses["lpips"] = lpipsl
+            #losses["lpips"] = lpipsl
 
             # DEBUG only: Check for loss values to find the cause of NaN
-            all_terms = [losses["adv"], losses["l1"], losses["edge"], sl, pl, lpipsl]
+            all_terms = [losses["adv"], losses["l1"], losses["edge"], sl, pl]
             with_nan = (not torch.isfinite(fake).all()) or (not all(torch.isfinite(x) for x in all_terms))
 
             if with_nan:
@@ -220,8 +220,8 @@ def main():
                                     f"l1={float(losses['l1']) if torch.isfinite(losses['l1']) else 'NaN'} "
                                     f"edge={float(losses['edge']) if torch.isfinite(losses['edge']) else 'NaN'} "
                                     f"style={float(losses['style']) if torch.isfinite(losses['style']) else 'NaN'} "
-                                    f"perceptual={float(losses['perceptual']) if torch.isfinite(losses['perceptual']) else 'NaN'}"
-                                    f"lpips={float(losses['lpips']) if torch.isfinite(losses['lpips']) else 'NaN'}")
+                                    f"perceptual={float(losses['perceptual']) if torch.isfinite(losses['perceptual']) else 'NaN'}")
+                                    #f"lpips={float(losses['lpips']) if torch.isfinite(losses['lpips']) else 'NaN'}")
                     train_tqdm.write(message_skip)
                     logger.info(message_skip)
                     nan_log_i = i
@@ -235,8 +235,8 @@ def main():
                                 L1_LAMBDA * losses["l1"] +
                                 edge_lambda * losses["edge"] +
                                 style_lambda * losses["style"] +
-                                perc_lambda * losses["perceptual"] +
-                                LPIPS_LAMBDA * losses["lpips"])
+                                perc_lambda * losses["perceptual"])
+                                #LPIPS_LAMBDA * losses["lpips"])
 
             g_tot += losses["totalG"].item()
             d_tot += losses["totalD"].item()
@@ -245,14 +245,14 @@ def main():
             num_batches += 1
 
             if i % SAVE_FREQ == 0:
-                raw = {k: float(losses[k]) for k in ["adv", "l1", "edge", "style", "perceptual", "lpips"]}
+                raw = {k: float(losses[k]) for k in ["adv", "l1", "edge", "style", "perceptual"]}
                 weighted = {
                     "adv_w": adv_lambda * raw["adv"],
                     "l1_w": L1_LAMBDA * raw["l1"],
                     "edge_w": edge_lambda * raw["edge"],
                     "style_w": style_lambda * raw["style"],
-                    "perceptual_w": perc_lambda * raw["perceptual"],
-                    "lpips_w": LPIPS_LAMBDA * raw["lpips"]
+                    "perceptual_w": perc_lambda * raw["perceptual"]
+                    #"lpips_w": LPIPS_LAMBDA * raw["lpips"]
                 }
                 logger.info(f"[Debug] Raw: {raw} | Weighted: {weighted}")
 
@@ -345,18 +345,18 @@ def main():
                     orig_full = clamp_f32(image)
                     vsl = lossStyle(orig_full, comp_full)
                     vpl = lossPerceptual(orig_full, comp_full)
-                    vlpipsl = lossLPIPS(orig_full, comp_full, mask_hole)
+                    #vlpipsl = lossLPIPS(orig_full, comp_full, mask_hole)
 
                 scale = torch.clamp(vgg_scale(mask_hole), 1.0, 4.0)
                 vsl *= scale
                 vpl *= scale
-                vlpipsl *= scale
+                #vlpipsl *= scale
                 # Loss totals for averaging
                 l1_tot += l1_loss.item()
                 edge_tot += edge_loss.item()
                 style_tot += vsl.item()
                 perc_tot += vpl.item()
-                lpips_tot += vlpipsl.item()
+                #lpips_tot += vlpipsl.item()
 
         # Continue with saved random state
         restore_rng(r, n, t, c)
@@ -368,14 +368,14 @@ def main():
         avg_edge = edge_tot / val_batches
         avg_style = style_tot / val_batches
         avg_perc = perc_tot / val_batches
-        avg_lpips = lpips_tot / val_batches
+        #avg_lpips = lpips_tot / val_batches
 
         val_g = (
             L1_LAMBDA * avg_l1 +
             VAL_EDGE_LAMBDA * avg_edge +
             VAL_STYLE_LAMBDA * avg_style +
-            VAL_PERCEPTUAL_LAMBDA * avg_perc +
-            LPIPS_LAMBDA * avg_lpips
+            VAL_PERCEPTUAL_LAMBDA * avg_perc
+            #LPIPS_LAMBDA * avg_lpips
         )
 
         avg_val_ssim = ssim_met_tot / val_batches
@@ -388,8 +388,8 @@ def main():
             f"L1={avg_l1:.4f}, "
             f"Edge={avg_edge:.4f}, "
             f"Style={avg_style:.4f}, "
-            f"Perc={avg_perc:.4f}, "
-            f"Lpips={avg_lpips:.4f} | "
+            f"Perc={avg_perc:.4f} | "
+            #f"Lpips={avg_lpips:.4f} | "
             f"SSIM={avg_val_ssim:.4f}, "
             f"LPIPS={avg_val_lpips:.4f}"
         )

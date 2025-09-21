@@ -69,8 +69,8 @@ STYLE_LAMBDA_SCHEDULE = [ # was constant before as STYLE_LAMBDA = 60.0
 VAL_STYLE_LAMBDA = 48 #60.0
 ADV_LAMBDA_SCHEDULE = [ # was constant before as ADV_LAMBDA = 0.005
     (0, 0.012),
-    (3, 0.015),
-    (10, 0.020)
+    (3, 0.018),
+    (10, 0.025)
 ]
 PERCEPTUAL_LAMBDA_SCHEDULE = [ # was constant before as PERCEPTUAL_LAMBDA = 0.1
     (0, 0.03),

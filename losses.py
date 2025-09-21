@@ -10,14 +10,14 @@ from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
 from torchmetrics.image.fid import FrechetInceptionDistance
 from utils.vision_utils import downsample
 
-def init_losses(device=get_device()):
+def init_losses(device):
     """Initialize the losses for model networks."""
     lossStyle = VGG19StyleLoss().to(device)
     lossPerceptual = VGG16PerceptualLoss().to(device)
     lossLPIPS = VGGLPIPSLoss().to(device)
     return lossStyle, lossPerceptual, lossLPIPS
 
-def init_metrics(device=get_device()):
+def init_metrics(device):
     """Initialize the metrics for model networks."""
     # no need to normalize as unit ones are fed!
     ssim = StructuralSimilarityIndexMeasure(data_range=1.0).to(device)

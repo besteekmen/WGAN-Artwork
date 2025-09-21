@@ -141,7 +141,9 @@ class FineGenerator(nn.Module):
             nn.Conv2d(G_HIDDEN * 4, G_HIDDEN * 2, 3, stride=1, padding=1),
             nn.ReLU(inplace=True),
             # 8th layer
-            nn.ConvTranspose2d(G_HIDDEN * 2, G_HIDDEN, 4, stride=2, padding=1),
+            nn.Conv2d(G_HIDDEN * 2, G_HIDDEN * 4, 3, padding=1, bias=True),
+            nn.PixelShuffle(2),
+            #nn.ConvTranspose2d(G_HIDDEN * 2, G_HIDDEN, 4, stride=2, padding=1),
             #nn.InstanceNorm2d(G_HIDDEN, affine=True), # keep one norm for stability
             nn.Identity(),
             nn.ReLU(inplace=True),
