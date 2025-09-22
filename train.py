@@ -201,10 +201,10 @@ def main():
 
             # Style & Perceptual loss (no amp to avoid NaN, only full scale)
             with (full_precision()):
-                comp_full = clamp_f32(composite) # reused composite
+                fake_full = clamp_f32(fake) # reused composite
                 orig_full = clamp_f32(image)
-                sl = lossVGGRing(lossStyle, orig_full, comp_full, mask_hole)
-                pl = lossVGGRing(lossPerceptual, orig_full, comp_full, mask_hole)
+                sl = lossVGGRing(lossStyle, orig_full, fake_full, mask_hole)
+                pl = lossVGGRing(lossPerceptual, orig_full, fake_full, mask_hole)
             losses["style"] = sl
             losses["perceptual"] = pl
 
@@ -345,10 +345,10 @@ def main():
 
                 # Style & Perceptual loss (no amp to avoid NaN, only full scale)
                 with full_precision():
-                    comp_full = clamp_f32(composite) # reused composite
+                    fake_full = clamp_f32(fake) # reused composite
                     orig_full = clamp_f32(image)
-                    vsl = lossVGGRing(lossStyle, orig_full, comp_full, mask_hole)
-                    vpl = lossVGGRing(lossPerceptual, orig_full, comp_full, mask_hole)
+                    vsl = lossVGGRing(lossStyle, orig_full, fake_full, mask_hole)
+                    vpl = lossVGGRing(lossPerceptual, orig_full, fake_full, mask_hole)
 
                 # Loss totals for averaging
                 l1_tot += l1_loss.item()
