@@ -62,12 +62,12 @@ EDGE_LAMBDA_SCHEDULE = [ # was constant before as EDGE_LAMBDA = 0.05
 ]
 VAL_EDGE_LAMBDA = 0.10
 STYLE_LAMBDA_SCHEDULE = [ # was constant before as STYLE_LAMBDA = 60.0
-    (0, 24.0),
-    (5, 36.0),
-    (10, 44.0),
-    (20, 52.0)
+    (0, 384.0), # 24 x 16
+    (5, 576.0), # 36 x 16
+    (10, 704.0), # 44 x 16
+    (20, 832.0) # 52 x 16
 ]
-VAL_STYLE_LAMBDA = 44 #60.0
+VAL_STYLE_LAMBDA = 704 #60.0
 ADV_LAMBDA_SCHEDULE = [ # was constant before as ADV_LAMBDA = 0.005
     (0, 0.006),
     (3, 0.0085),
