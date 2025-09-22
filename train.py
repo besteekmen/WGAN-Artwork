@@ -10,7 +10,8 @@ from torch import amp
 # Project specific modules
 from config import *
 from losses import gradient_penalty, init_losses, lossMSL1, init_metrics, lossEdgeRing, vgg_scale
-from models.model_builder import init_optimizers, init_nets, save_checkpoint, setup_model, forward_pass
+from models.model_builder import init_optimizers, init_nets, save_checkpoint, setup_model, forward_pass, init_ema, \
+    save_ema
 from utils.utils import to_unit, set_seed, get_device, print_device, make_run_directory, half_precision, \
     full_precision, get_schedule, set_logger, is_cuda, clamp_f32, to_u8, freeze_rng, restore_rng
 from dataset import prepare_dataset, prepare_batch
@@ -39,8 +40,9 @@ def main():
     # Initialize or load the model
     netG, globalD, localD = init_nets(device)
     optimG, optimGD, optimLD = init_optimizers(netG, globalD, localD)
-    start_epoch = setup_model(netG, globalD, localD,
-                              optimG, optimGD, optimLD, check_path, device)
+    ema = init_ema(netG, device=device)
+    start_epoch = setup_model(netG, globalD, localD, optimG, optimGD, optimLD,
+                              check_path, ema, device)
     # To load a pretrained model, add file_name as parameter to setup_model
 
     # Init losses and quality metrics
@@ -200,14 +202,11 @@ def main():
                 orig_full = clamp_f32(image)
                 sl = lossStyle(orig_full, comp_full)
                 pl = lossPerceptual(orig_full, comp_full)
-                #lpipsl = lossLPIPS(orig_full, comp_full, mask_hole)
             scale = torch.clamp(vgg_scale(mask_hole), 1.0, 4.0)
             sl *= scale
             pl *= scale
-            #lpipsl *= scale
             losses["style"] = sl
             losses["perceptual"] = pl
-            #losses["lpips"] = lpipsl
 
             # DEBUG only: Check for loss values to find the cause of NaN
             all_terms = [losses["adv"], losses["l1"], losses["edge"], sl, pl]
@@ -221,7 +220,6 @@ def main():
                                     f"edge={float(losses['edge']) if torch.isfinite(losses['edge']) else 'NaN'} "
                                     f"style={float(losses['style']) if torch.isfinite(losses['style']) else 'NaN'} "
                                     f"perceptual={float(losses['perceptual']) if torch.isfinite(losses['perceptual']) else 'NaN'}")
-                                    #f"lpips={float(losses['lpips']) if torch.isfinite(losses['lpips']) else 'NaN'}")
                     train_tqdm.write(message_skip)
                     logger.info(message_skip)
                     nan_log_i = i
@@ -236,7 +234,6 @@ def main():
                                 edge_lambda * losses["edge"] +
                                 style_lambda * losses["style"] +
                                 perc_lambda * losses["perceptual"])
-                                #LPIPS_LAMBDA * losses["lpips"])
 
             g_tot += losses["totalG"].item()
             d_tot += losses["totalD"].item()
@@ -262,6 +259,7 @@ def main():
             torch.nn.utils.clip_grad_norm_(netG.parameters(), 1.0) # Clip gradients
             scalerG.step(optimG)
             scalerG.update()
+            ema.update() # update ema weights
 
             # Free memory for generator step
             del adv_local, adv_global, patches
@@ -309,6 +307,10 @@ def main():
         # Set validation mode
         netG.eval(); globalD.eval(); localD.eval()
 
+        # Switch to EMA weights for evaluation
+        ema.store() # backup current generator weights
+        ema.copy_to(netG.parameters()) # put EMA weights into generator
+
         # Freeze random number generator for deterministic validation
         r, n, t, c = freeze_rng(VAL_SEED)
 
@@ -345,21 +347,22 @@ def main():
                     orig_full = clamp_f32(image)
                     vsl = lossStyle(orig_full, comp_full)
                     vpl = lossPerceptual(orig_full, comp_full)
-                    #vlpipsl = lossLPIPS(orig_full, comp_full, mask_hole)
 
                 scale = torch.clamp(vgg_scale(mask_hole), 1.0, 4.0)
                 vsl *= scale
                 vpl *= scale
-                #vlpipsl *= scale
+
                 # Loss totals for averaging
                 l1_tot += l1_loss.item()
                 edge_tot += edge_loss.item()
                 style_tot += vsl.item()
                 perc_tot += vpl.item()
-                #lpips_tot += vlpipsl.item()
 
         # Continue with saved random state
         restore_rng(r, n, t, c)
+
+        # Continue with training weights
+        ema.restore() # restore generator weights
 
         # -----------------------------------------------------------------------
         # Validation logging
@@ -406,12 +409,16 @@ def main():
         # Save models (Generator and Discriminators)
         # -----------------------------------------------------------------------
         if (epoch + 1) % CHECKPOINT_EVERY == 0:
-            save_checkpoint(epoch, netG, globalD, localD, optimG, optimGD, optimLD, check_path)
+            save_checkpoint(epoch, netG, globalD, localD, optimG, optimGD, optimLD, check_path, ema)
 
         # -----------------------------------------------------------------------
         # Epoch logging and visualization (fixed samples)
         # -------------------------------------------- ---------------------------
         with torch.no_grad():
+            # Switch to EMA weights
+            ema.store()
+            ema.copy_to(netG.parameters())
+
             fixed_fake, fixed_comp = forward_pass(netG, fixed_image, fixed_mask_hole)
 
             # Convert images to [0,1] for RGB and visualization
@@ -449,6 +456,9 @@ def main():
             save_images(unit_image, unit_masked, unit_comp, 0, # vertical stack per sample
                         fixed_image.size(0), out_path, f'fixed_epoch{epoch+1}.png')
 
+            # Restore training weights
+            ema.restore()
+
         if early_stopping:
             break
 
@@ -470,6 +480,9 @@ def main():
     print("Training complete!")
     stop_time = datetime.now()
     print(f"Time:{(stop_time - start_time)} | Steps:{global_step}")
+
+    # Export EMA weights for testing
+    save_ema(netG, ema, check_path)
 
     # Plot per-batch and per-epoch loss curve
     plot_loss("batch", blog, out_path)

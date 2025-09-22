@@ -2,6 +2,8 @@ import os
 import re
 import torch
 from torch import optim
+from torch_ema import ExponentialMovingAverage
+
 from models.generator import Generator
 from models.discriminator import GlobalDiscriminator, LocalDiscriminator
 from models.weights_init import weights_init_normal, bias_init_gate
@@ -24,12 +26,31 @@ def init_optimizers(netG, globalD, localD):
     optimLD = optim.Adam(localD.parameters(), lr=LR_D, betas=OPTIM_BETAS)
     return optimG, optimGD, optimLD
 
-def setup_model(netG, globalD, localD, optimG, optimGD, optimLD, check_path, device=None, load_file="", is_pretrained=LOAD_MODEL):
+def init_ema(netG, decay=0.999, device=None):
+    """Initialize the Exponential Moving Average."""
+    if device is None:
+        device = get_device()
+    ema = ExponentialMovingAverage(netG.parameters(), decay=decay)
+    ema.to(device)
+    return ema
+
+def save_ema(netG, ema, check_path):
+    ema.store()
+    ema.copy_to(netG.parameters())
+    torch.save(netG.state_dict(),
+               os.path.join(check_path, "netG_ema_final.pt"))
+    ema.restore()
+
+def setup_model(netG, globalD, localD, optimG, optimGD, optimLD,
+                check_path, ema=None, device=None, load_file="",
+                is_pretrained=LOAD_MODEL):
     """Setup the model either by initializing or loading."""
+    if device is None:
+        device = get_device()
     if is_pretrained:
         start_epoch = load_model(netG, globalD, localD,
                                  optimG, optimGD, optimLD,
-                                 check_path, load_file, device) # add checkpoint file name as the last parameter
+                                 check_path, load_file, device, ema) # add checkpoint file name as the last parameter
     else:
         start_epoch = init_model(netG, globalD, localD, optimG, optimGD, optimLD) # w/o checkpoint!
     return start_epoch
@@ -46,11 +67,11 @@ def init_model(netG, globalD, localD, optimG, optimGD, optimLD):
     start_epoch = 0
     return start_epoch
 
-def load_model(netG, globalD, localD, optimG, optimGD, optimLD, check_path, load_file, device=None):
+def load_model(netG, globalD, localD, optimG, optimGD, optimLD, check_path, load_file, device=None, ema=None):
     """Load the model from the checkpoint in given location."""
     start_epoch = 0
     checkpoint_file = os.path.join(check_path, load_file)
-    load_epoch = load_checkpoint(netG, globalD, localD, optimG, optimGD, optimLD, checkpoint_file, device)
+    load_epoch = load_checkpoint(netG, globalD, localD, optimG, optimGD, optimLD, checkpoint_file, device, ema)
     if load_epoch is not None:
         start_epoch = load_epoch + 1
     else:  # for older checkpoints without epoch number
@@ -62,7 +83,7 @@ def load_model(netG, globalD, localD, optimG, optimGD, optimLD, check_path, load
     # for pg in optimG.param_groups: pg['lr'] = LR_G
     return start_epoch
 
-def save_checkpoint(epoch, netG, globalD, localD, optimG, optimGD, optimLD, path):
+def save_checkpoint(epoch, netG, globalD, localD, optimG, optimGD, optimLD, path, ema=None):
     """Save the checkpoint."""
     checkpoint = {
         'epoch': epoch,
@@ -73,9 +94,11 @@ def save_checkpoint(epoch, netG, globalD, localD, optimG, optimGD, optimLD, path
         'optimGD': optimGD.state_dict(),
         'optimLD': optimLD.state_dict()
     }
+    if ema is not None:
+        checkpoint['ema'] = ema.state_dict()
     torch.save(checkpoint, os.path.join(path, f'checkpoint{epoch + 1}.pth.tar'))
 
-def load_checkpoint(netG, globalD, localD, optimG, optimGD, optimLD, checkpoint_file, device):
+def load_checkpoint(netG, globalD, localD, optimG, optimGD, optimLD, checkpoint_file, device, ema=None):
     """Load the checkpoint."""
     if device is None:
         device = get_device()
@@ -88,6 +111,8 @@ def load_checkpoint(netG, globalD, localD, optimG, optimGD, optimLD, checkpoint_
     optimG.load_state_dict(checkpoint['optimG'])
     optimGD.load_state_dict(checkpoint['optimGD'])
     optimLD.load_state_dict(checkpoint['optimLD'])
+    if ema is not None and 'ema' in checkpoint:
+        ema.load_state_dict(checkpoint['ema'])
     return checkpoint.get('epoch', None)
 
 def forward_pass(netG, image, mask_hole):
