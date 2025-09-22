@@ -74,13 +74,12 @@ class CoarseGenerator(nn.Module):
         self.decoder = nn.Sequential(
             # 7th layer
             nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False),
-            nn.Conv2d(G_HIDDEN * 4, G_HIDDEN * 2, 3, stride=1, padding=1),
+            nn.Conv2d(G_HIDDEN * 4, G_HIDDEN * 2, 3, stride=1, padding=1, padding_mode="reflect"),
             nn.InstanceNorm2d(G_HIDDEN * 2, affine=True), # --> replaced BatchNorm2d
             nn.ReLU(inplace=True),
             # 8th layer
             nn.ConvTranspose2d(G_HIDDEN * 2, G_HIDDEN, 4, stride=2, padding=1),
-            #nn.InstanceNorm2d(G_HIDDEN, affine=True),  # --> replaced BatchNorm2d
-            nn.Identity(), # preserve local color/texture and reduce hallucination?
+            nn.InstanceNorm2d(G_HIDDEN, affine=True),  # --> replaced BatchNorm2d
             nn.ReLU(inplace=True),
             # 9th layer (to RGB)
             nn.Conv2d(G_HIDDEN,3, 3, padding=1),
@@ -138,14 +137,13 @@ class FineGenerator(nn.Module):
         self.decoder = nn.Sequential( # Norm removed to preserve textures
             # 7th layer
             nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False),
-            nn.Conv2d(G_HIDDEN * 4, G_HIDDEN * 2, 3, stride=1, padding=1),
+            nn.Conv2d(G_HIDDEN * 4, G_HIDDEN * 2, 3, stride=1, padding=1, padding_mode="reflect"),
             nn.ReLU(inplace=True),
             # 8th layer
-            nn.Conv2d(G_HIDDEN * 2, G_HIDDEN * 4, 3, padding=1, bias=True),
-            nn.PixelShuffle(2),
-            #nn.ConvTranspose2d(G_HIDDEN * 2, G_HIDDEN, 4, stride=2, padding=1),
-            #nn.InstanceNorm2d(G_HIDDEN, affine=True), # keep one norm for stability
-            nn.Identity(),
+            #nn.Conv2d(G_HIDDEN * 2, G_HIDDEN * 4, 3, padding=1, bias=True, padding_mode="reflect"),
+            #nn.PixelShuffle(2),
+            nn.ConvTranspose2d(G_HIDDEN * 2, G_HIDDEN, 4, stride=2, padding=1, padding_mode="reflect"),
+            nn.InstanceNorm2d(G_HIDDEN, affine=True), # keep one norm for stability
             nn.ReLU(inplace=True),
             # 9th layer (to RGB)
             nn.Conv2d(G_HIDDEN, 3, 3, padding=1),
