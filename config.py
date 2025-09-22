@@ -27,7 +27,7 @@ EPOCH_NUM = 50
 # If discriminator gets perfect quickly, generator gradients may vanish!
 # Hence make learning slower for D and faster for G (Contextual Attention GAN, Yu et al. 2018)
 LR_G = 1e-4 # generator learning rate, change to 1e-4 if NaN g loss
-LR_D = 1e-4 #8e-5 # discriminator learning rate, was also 1e-4, reduced for G to sharpen details
+LR_D = 8e-5 # discriminator learning rate, was also 1e-4, reduced for G to sharpen details
 OPTIM_BETAS = (0.0, 0.9)
 
 # --- Model hyperparameters ---
@@ -50,27 +50,27 @@ IRR_RATIO_SCHEDULE = [ # irregular masks ratio was constant at 0.3 before
 ]
 
 # --- Loss weights and hyperparameters ---
-HOLE_LAMBDA = 6.0 # 4.0 # full weight for missing region, reduced from 6.0 to avoid large gradients
+HOLE_LAMBDA = 7.5 # 4.0 # full weight for missing region, reduced from 6.0 to avoid large gradients
 VALID_LAMBDA = 0.1 # 0.2 # 1.0 # smaller for known region (was 0.1)
 L1_LAMBDA = 0.25 #0.5 #1.0 # was 10.0 reconstruction loss weight
 LPIPS_LAMBDA = 0.15 # 0.05 or 0.15 later
 EDGE_LAMBDA_SCHEDULE = [ # was constant before as EDGE_LAMBDA = 0.05
-    (0, 0.06),
-    (10, 0.08),
-    (20, 0.10)
+    (0, 0.07),
+    (10, 0.10),
+    (20, 0.12)
 ]
-VAL_EDGE_LAMBDA = 0.08
+VAL_EDGE_LAMBDA = 0.10
 STYLE_LAMBDA_SCHEDULE = [ # was constant before as STYLE_LAMBDA = 60.0
     (0, 24.0),
     (5, 36.0),
-    (10, 48.0),
-    (20, 60.0)
+    (10, 44.0),
+    (20, 52.0)
 ]
-VAL_STYLE_LAMBDA = 48 #60.0
+VAL_STYLE_LAMBDA = 44 #60.0
 ADV_LAMBDA_SCHEDULE = [ # was constant before as ADV_LAMBDA = 0.005
-    (0, 0.012),
-    (3, 0.018),
-    (10, 0.025)
+    (0, 0.008),
+    (3, 0.012),
+    (10, 0.020)
 ]
 PERCEPTUAL_LAMBDA_SCHEDULE = [ # was constant before as PERCEPTUAL_LAMBDA = 0.1
     (0, 0.03),
@@ -84,7 +84,7 @@ PERCEPTUAL_LAMBDA = 0.1 # Reduced from 0.05 for smoother early training
 GP_LAMBDA = 10.0 # WGAN-GP penalty weight
 SCALES = [1.0, 0.5, 0.25] # multiscale factors
 SCALE_WEIGHTS = [1.0, 0.5, 0.25] # multiscale factor weights
-EDGE_RING = 3
+EDGE_RING = 2
 LPIPS_RING = 3
 
 # --- Datasets and paths ---
