@@ -61,7 +61,7 @@ class VGG19StyleLoss(nn.Module):
         """
         B, C, H, W = features.size()
         feats = features.view(B, C, H * W)
-        denominator = (H * W) + EPS # not (C * H * W) to not dampen further
+        denominator = (C * H * W) + EPS # not (H * W) to dampen style dominance
         return torch.bmm(feats, feats.transpose(1, 2)) / denominator
 
     def forward(self, real, fake):
