@@ -253,7 +253,7 @@ def get_ring(x, size=3):
 def lossEdge(real, fake):
     return F.l1_loss(sobel(fake), sobel(real), reduction="mean") # use functional l1, not class one
 
-def lossEdgeRing(real, fake, mask_hole, size=EDGE_RING, ring_type="outer"):
+def lossEdgeRing(real, fake, mask_hole, size=EDGE_RING, ring_type="both"):
     ring = get_ring(mask_hole, size)[ring_type].to(fake.dtype).float()
     return masked_l1(sobel(fake), sobel(real), ring)
 

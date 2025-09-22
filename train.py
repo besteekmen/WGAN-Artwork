@@ -194,7 +194,7 @@ def main():
                 losses["l1"] = lossMSL1(image, composite, mask_hole)
 
                 # Edge loss
-                losses["edge"] = lossEdgeRing(image, composite, mask_hole)
+                losses["edge"] = lossEdgeRing(image, fake, mask_hole)
 
                 # TV loss
                 losses["tv"] = lossTV(composite, mask_hole)
@@ -341,11 +341,11 @@ def main():
                     l1_loss = lossMSL1(image, composite, mask_hole)
 
                     # Edge loss
-                    edge_loss = lossEdgeRing(image, composite, mask_hole)
+                    edge_loss = lossEdgeRing(image, fake, mask_hole)
 
                 # Style & Perceptual loss (no amp to avoid NaN, only full scale)
                 with full_precision():
-                    fake_full = clamp_f32(fake) # reused composite
+                    fake_full = clamp_f32(fake) # reused fake
                     orig_full = clamp_f32(image)
                     vsl = lossVGGRing(lossStyle, orig_full, fake_full, mask_hole)
                     vpl = lossVGGRing(lossPerceptual, orig_full, fake_full, mask_hole)
