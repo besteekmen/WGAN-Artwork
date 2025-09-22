@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torchvision.models as tvmodels
 
-from config import SCALES, HOLE_LAMBDA, VALID_LAMBDA, EPS, EDGE_RING, LPIPS_RING
+from config import SCALES, HOLE_LAMBDA, VALID_LAMBDA, EPS, EDGE_RING, LPIPS_RING, VGG_RING
 from utils.utils import get_device
 from torchmetrics.image.ssim import StructuralSimilarityIndexMeasure
 from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
@@ -61,7 +61,7 @@ class VGG19StyleLoss(nn.Module):
         """
         B, C, H, W = features.size()
         feats = features.view(B, C, H * W)
-        denominator = (C * H * W) + EPS
+        denominator = (H * W) + EPS # not (C * H * W) to not dampen further
         return torch.bmm(feats, feats.transpose(1, 2)) / denominator
 
     def forward(self, real, fake):
@@ -257,7 +257,29 @@ def lossEdgeRing(real, fake, mask_hole, size=EDGE_RING, ring_type="outer"):
     ring = get_ring(mask_hole, size)[ring_type].to(fake.dtype).float()
     return masked_l1(sobel(fake), sobel(real), ring)
 
+def lossVGGRing(module, real, fake, mask_hole, size=VGG_RING, ring_type="outer"):
+    ring = get_ring(mask_hole, size)[ring_type].to(fake.dtype).float()
+    r = real * ring + EPS
+    f = fake * ring + EPS
+    return module(r, f) * vgg_scale(ring)
+
+def lossTV(x, mask):
+    """Return Total Variation (how much neighbours change).
+    Calculate over the hole only, anisotropic so preserve edges."""
+    dy = (x[:, :, 1:, :] - x[:, :, :-1, :]).abs()
+    dx = (x[:, :, :, 1:] - x[:, :, :, :-1]).abs()
+    if mask is not None:
+        my = mask[:, :, 1:, :]
+        mx = mask[:, :, :, 1:]
+        dy = dy * my
+        dx = dx * mx
+        num = (dy.sum() + dx.sum())
+        denom = (my.sum() + mx.sum()).clamp_min(1.0)
+        return num / denom
+    return dy.mean() + dx.mean()
+
 def vgg_scale(mask):
+    """Approximate per-pixel average for various mask holes."""
     B, C, H, W = mask.size()
     total = float(H * W)
     active = mask.sum(dim=(1, 2, 3)).mean()

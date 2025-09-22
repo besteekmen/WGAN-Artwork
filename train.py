@@ -9,7 +9,7 @@ from torch import amp
 
 # Project specific modules
 from config import *
-from losses import gradient_penalty, init_losses, lossMSL1, init_metrics, lossEdgeRing, vgg_scale
+from losses import gradient_penalty, init_losses, lossMSL1, init_metrics, lossEdgeRing, lossVGGRing, lossTV
 from models.model_builder import init_optimizers, init_nets, save_checkpoint, setup_model, forward_pass, init_ema, \
     save_ema
 from utils.utils import to_unit, set_seed, get_device, print_device, make_run_directory, half_precision, \
@@ -196,20 +196,20 @@ def main():
                 # Edge loss
                 losses["edge"] = lossEdgeRing(image, composite, mask_hole)
 
+                # TV loss
+                losses["tv"] = lossTV(composite, mask_hole)
+
             # Style & Perceptual loss (no amp to avoid NaN, only full scale)
-            with full_precision():
+            with (full_precision()):
                 comp_full = clamp_f32(composite) # reused composite
                 orig_full = clamp_f32(image)
-                sl = lossStyle(orig_full, comp_full)
-                pl = lossPerceptual(orig_full, comp_full)
-            scale = torch.clamp(vgg_scale(mask_hole), 1.0, 4.0)
-            sl *= scale
-            pl *= scale
+                sl = lossVGGRing(lossStyle, orig_full, comp_full, mask_hole)
+                pl = lossVGGRing(lossPerceptual, orig_full, comp_full, mask_hole)
             losses["style"] = sl
             losses["perceptual"] = pl
 
             # DEBUG only: Check for loss values to find the cause of NaN
-            all_terms = [losses["adv"], losses["l1"], losses["edge"], sl, pl]
+            all_terms = [losses["adv"], losses["l1"], losses["edge"], losses["tv"], sl, pl]
             with_nan = (not torch.isfinite(fake).all()) or (not all(torch.isfinite(x) for x in all_terms))
 
             if with_nan:
@@ -218,6 +218,7 @@ def main():
                                     f"adv={float(losses['adv']) if torch.isfinite(losses['adv']) else 'NaN'} "
                                     f"l1={float(losses['l1']) if torch.isfinite(losses['l1']) else 'NaN'} "
                                     f"edge={float(losses['edge']) if torch.isfinite(losses['edge']) else 'NaN'} "
+                                    f"tv={float(losses['tv']) if torch.isfinite(losses['tv']) else 'NaN'} "
                                     f"style={float(losses['style']) if torch.isfinite(losses['style']) else 'NaN'} "
                                     f"perceptual={float(losses['perceptual']) if torch.isfinite(losses['perceptual']) else 'NaN'}")
                     train_tqdm.write(message_skip)
@@ -232,6 +233,7 @@ def main():
             losses["totalG"] = (adv_lambda * losses["adv"] +
                                 L1_LAMBDA * losses["l1"] +
                                 edge_lambda * losses["edge"] +
+                                TV_LAMBDA * losses["tv"] +
                                 style_lambda * losses["style"] +
                                 perc_lambda * losses["perceptual"])
 
@@ -242,14 +244,14 @@ def main():
             num_batches += 1
 
             if i % SAVE_FREQ == 0:
-                raw = {k: float(losses[k]) for k in ["adv", "l1", "edge", "style", "perceptual"]}
+                raw = {k: float(losses[k]) for k in ["adv", "l1", "edge", "tv", "style", "perceptual"]}
                 weighted = {
                     "adv_w": adv_lambda * raw["adv"],
                     "l1_w": L1_LAMBDA * raw["l1"],
                     "edge_w": edge_lambda * raw["edge"],
+                    "tv_w": TV_LAMBDA * raw["tv"],
                     "style_w": style_lambda * raw["style"],
                     "perceptual_w": perc_lambda * raw["perceptual"]
-                    #"lpips_w": LPIPS_LAMBDA * raw["lpips"]
                 }
                 logger.info(f"[Debug] Raw: {raw} | Weighted: {weighted}")
 
@@ -345,12 +347,8 @@ def main():
                 with full_precision():
                     comp_full = clamp_f32(composite) # reused composite
                     orig_full = clamp_f32(image)
-                    vsl = lossStyle(orig_full, comp_full)
-                    vpl = lossPerceptual(orig_full, comp_full)
-
-                scale = torch.clamp(vgg_scale(mask_hole), 1.0, 4.0)
-                vsl *= scale
-                vpl *= scale
+                    vsl = lossVGGRing(lossStyle, orig_full, comp_full, mask_hole)
+                    vpl = lossVGGRing(lossPerceptual, orig_full, comp_full, mask_hole)
 
                 # Loss totals for averaging
                 l1_tot += l1_loss.item()

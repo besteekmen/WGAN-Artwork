@@ -54,6 +54,7 @@ HOLE_LAMBDA = 7.5 # 4.0 # full weight for missing region, reduced from 6.0 to av
 VALID_LAMBDA = 0.1 # 0.2 # 1.0 # smaller for known region (was 0.1)
 L1_LAMBDA = 0.25 #0.5 #1.0 # was 10.0 reconstruction loss weight
 LPIPS_LAMBDA = 0.15 # 0.05 or 0.15 later
+TV_LAMBDA = 2e-4
 EDGE_LAMBDA_SCHEDULE = [ # was constant before as EDGE_LAMBDA = 0.05
     (0, 0.07),
     (10, 0.10),
@@ -68,9 +69,9 @@ STYLE_LAMBDA_SCHEDULE = [ # was constant before as STYLE_LAMBDA = 60.0
 ]
 VAL_STYLE_LAMBDA = 44 #60.0
 ADV_LAMBDA_SCHEDULE = [ # was constant before as ADV_LAMBDA = 0.005
-    (0, 0.008),
-    (3, 0.012),
-    (10, 0.020)
+    (0, 0.006),
+    (3, 0.0085),
+    (10, 0.014)
 ]
 PERCEPTUAL_LAMBDA_SCHEDULE = [ # was constant before as PERCEPTUAL_LAMBDA = 0.1
     (0, 0.03),
@@ -86,6 +87,7 @@ SCALES = [1.0, 0.5, 0.25] # multiscale factors
 SCALE_WEIGHTS = [1.0, 0.5, 0.25] # multiscale factor weights
 EDGE_RING = 2
 LPIPS_RING = 3
+VGG_RING = 3
 
 # --- Datasets and paths ---
 OUT_PATH = 'out'
