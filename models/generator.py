@@ -73,7 +73,7 @@ class CoarseGenerator(nn.Module):
         )
         self.decoder = nn.Sequential(
             # 7th layer
-            nn.Upsample(scale_factor=2, mode='nearest'),
+            nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False),
             nn.Conv2d(G_HIDDEN * 4, G_HIDDEN * 2, 3, stride=1, padding=1),
             nn.InstanceNorm2d(G_HIDDEN * 2, affine=True), # --> replaced BatchNorm2d
             nn.ReLU(inplace=True),
@@ -136,7 +136,7 @@ class FineGenerator(nn.Module):
         )
         self.decoder = nn.Sequential( # Norm removed to preserve textures
             # 7th layer
-            nn.Upsample(scale_factor=2, mode='nearest'),
+            nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False),
             nn.Conv2d(G_HIDDEN * 4, G_HIDDEN * 2, 3, stride=1, padding=1),
             nn.ReLU(inplace=True),
             # 8th layer

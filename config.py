@@ -50,15 +50,15 @@ IRR_RATIO_SCHEDULE = [ # irregular masks ratio was constant at 0.3 before
 ]
 
 # --- Loss weights and hyperparameters ---
-HOLE_LAMBDA = 7.5 # 4.0 # full weight for missing region, reduced from 6.0 to avoid large gradients
-VALID_LAMBDA = 0.1 # 0.2 # 1.0 # smaller for known region (was 0.1)
-L1_LAMBDA = 0.25 #0.5 #1.0 # was 10.0 reconstruction loss weight
-LPIPS_LAMBDA = 0.15 # 0.05 or 0.15 later
+HOLE_LAMBDA = 4.0 # 4.0 # full weight for missing region, reduced from 6.0 to avoid large gradients
+VALID_LAMBDA = 1.0 # 0.2 # 1.0 # smaller for known region (was 0.1)
+L1_LAMBDA = 1.0 #0.5 #1.0 # was 10.0 reconstruction loss weight
 TV_LAMBDA = 4e-4
 EDGE_LAMBDA_SCHEDULE = [ # was constant before as EDGE_LAMBDA = 0.05
-    (0, 0.07),
-    (10, 0.10),
-    (20, 0.12)
+    (0, 0.00),
+    (10, 0.015),
+    (20, 0.024),
+    (30, 0.030)
 ]
 VAL_EDGE_LAMBDA = 0.10
 STYLE_LAMBDA_SCHEDULE = [ # was constant before as STYLE_LAMBDA = 60.0
@@ -78,11 +78,10 @@ VAL_PERCEPTUAL_LAMBDA = 0.05
 ADV_LAMBDA = 0.006 # small weight for adversarial loss (for stable training)
 PERCEPTUAL_LAMBDA = 0.1 # Reduced from 0.05 for smoother early training
 # If textures too blurry, try 0.1
-GP_LAMBDA = 10.0 # WGAN-GP penalty weight
+GP_LAMBDA = 20.0 # WGAN-GP penalty weight
 SCALES = [1.0, 0.5, 0.25] # multiscale factors
 SCALE_WEIGHTS = [1.0, 0.5, 0.25] # multiscale factor weights
 EDGE_RING = 2
-LPIPS_RING = 3
 VGG_RING = 3
 
 # --- Datasets and paths ---

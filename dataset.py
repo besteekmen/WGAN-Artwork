@@ -107,15 +107,15 @@ def generate_square_mask(height, width, rand=None,
     mask = torch.ones(1, height, width, dtype=torch.float32)  # [1, H, W]
     mask[:, top:top + block_size, left:left + block_size] = 0  # (1 = known, 0 = hole)
 
-    if rand.random() < p_rotate:
-        angle = rand.uniform(-max_angle, max_angle)
-        mask = rotate(
-            mask,
-            angle,
-            interpolation=InterpolationMode.NEAREST,
-            fill=[1.0]
-        )
-        mask = (mask > 0.5).float()
+    #if rand.random() < p_rotate:
+    #    angle = rand.uniform(-max_angle, max_angle)
+    #    mask = rotate(
+    #        mask,
+    #        angle,
+    #        interpolation=InterpolationMode.NEAREST,
+    #        fill=[1.0]
+    #    )
+    #    mask = (mask > 0.5).float()
     return mask
 
 def generate_irregular_mask(height, width, brush_width=(7, 25),
