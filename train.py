@@ -98,7 +98,7 @@ def main():
         nan_log_i = -999999
 
         # Set lambda schedules
-        #adv_lambda = get_schedule(epoch, ADV_LAMBDA_SCHEDULE)
+        adv_lambda = get_schedule(epoch, ADV_LAMBDA_SCHEDULE)
         perc_lambda = get_schedule(epoch, PERCEPTUAL_LAMBDA_SCHEDULE)
         style_lambda = get_schedule(epoch, STYLE_LAMBDA_SCHEDULE)
         edge_lambda = get_schedule(epoch, EDGE_LAMBDA_SCHEDULE)
@@ -230,7 +230,7 @@ def main():
                 continue
 
             # Final generator loss
-            losses["totalG"] = (ADV_LAMBDA * losses["adv"] +
+            losses["totalG"] = (adv_lambda * losses["adv"] +
                                 L1_LAMBDA * losses["l1"] +
                                 edge_lambda * losses["edge"] +
                                 TV_LAMBDA * losses["tv"] +
@@ -246,7 +246,7 @@ def main():
             if i % SAVE_FREQ == 0:
                 raw = {k: float(losses[k]) for k in ["adv", "l1", "edge", "tv", "style", "perceptual"]}
                 weighted = {
-                    "adv_w": ADV_LAMBDA * raw["adv"],
+                    "adv_w": adv_lambda * raw["adv"],
                     "l1_w": L1_LAMBDA * raw["l1"],
                     "edge_w": edge_lambda * raw["edge"],
                     "tv_w": TV_LAMBDA * raw["tv"],

@@ -40,7 +40,7 @@ G_HIDDEN = 64 # base generator channels (stage)
 IMAGE_CHANNELS = 3 # Num of color channels
 X_DIM = 64
 LOCAL_PATCH_SIZE = 128 # Patch size for local discriminator
-JITTER = 8 #16
+JITTER = 16
 
 # --- Mask settings ---
 IRR_RATIO_SCHEDULE = [ # irregular masks ratio was constant at 0.3 before
@@ -62,20 +62,24 @@ EDGE_LAMBDA_SCHEDULE = [ # was constant before as EDGE_LAMBDA = 0.05
 ]
 VAL_EDGE_LAMBDA = 0.10
 STYLE_LAMBDA_SCHEDULE = [ # was constant before as STYLE_LAMBDA = 60.0
-    (0, 384.0), # 24 x 16
-    (5, 576.0), # 36 x 16
-    (10, 704.0), # 44 x 16
-    (20, 832.0) # 52 x 16
+    (0, 18.0), # 24 x 16
+    (5, 36.0), # 36 x 16
+    (10, 48.0), # 44 x 16
+    (20, 60.0) # 52 x 16
 ]
-VAL_STYLE_LAMBDA = 704 #60.0
-#ADV_LAMBDA_SCHEDULE = [(0, 0.006), (3, 0.0085), (10, 0.014)]
+VAL_STYLE_LAMBDA = 60.0
+ADV_LAMBDA_SCHEDULE = [
+    (0, 0.005),
+    (3, 0.0075),
+    (10, 0.01)
+]
 PERCEPTUAL_LAMBDA_SCHEDULE = [ # was constant before as PERCEPTUAL_LAMBDA = 0.1
-    (0, 0.03),
-    (5, 0.05),
-    (15, 0.06)
+    (0, 0.1),
+    (25, 0.075),
+    (35, 0.05)
 ]
 VAL_PERCEPTUAL_LAMBDA = 0.05
-ADV_LAMBDA = 0.006 # small weight for adversarial loss (for stable training)
+ADV_LAMBDA = 0.005 # small weight for adversarial loss (for stable training)
 PERCEPTUAL_LAMBDA = 0.1 # Reduced from 0.05 for smoother early training
 # If textures too blurry, try 0.1
 GP_LAMBDA = 20.0 # WGAN-GP penalty weight
