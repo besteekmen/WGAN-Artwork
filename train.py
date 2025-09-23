@@ -328,7 +328,7 @@ def main():
         r, n, t, c = freeze_rng(VAL_SEED)
 
         with torch.no_grad():
-            ssim_met_tot, lpips_met_tot = 0.0, 0.0
+            ssim_tot, lpips_tot = 0.0, 0.0
             l1_tot, edge_tot, style_tot, perc_tot = 0.0, 0.0, 0.0, 0.0
             val_batches = 0
 
@@ -343,8 +343,8 @@ def main():
                 # Compute square mask metrics
                 unit_image = to_unit(image)
                 unit_comp = to_unit(composite)
-                ssim_met_tot += ssim(unit_comp, unit_image).item()
-                lpips_met_tot += lpips(unit_comp, unit_image).item()
+                ssim_tot += ssim(unit_comp, unit_image).item()
+                lpips_tot += lpips(unit_comp, unit_image).item()
                 val_batches += 1
 
                 with half_precision(): # no adv loss for validation!
@@ -352,7 +352,7 @@ def main():
                     l1_loss = lossMSL1(image, fake, mask_hole)
 
                     # Edge loss
-                    if epoch <= 3:
+                    if epoch <= 50:
                         edge_loss = lossEdge(image, fake)
                     else:
                         edge_loss = lossEdgeRing(image, fake, mask_hole, size=edge_ring, ring_type="outer")
@@ -360,7 +360,7 @@ def main():
                 # Style & Perceptual loss (no amp to avoid NaN, only full scale)
                 with full_precision():
                     orig_full = clamp_f32(image)
-                    if epoch <= 3:
+                    if epoch <= 50:
                         comp_full = clamp_f32(composite)
                         vsl = lossStyle(orig_full, comp_full)
                         vpl = lossPerceptual(orig_full, comp_full)
@@ -392,13 +392,13 @@ def main():
 
         val_g = (
             L1_LAMBDA * avg_l1 +
-            VAL_EDGE_LAMBDA * avg_edge +
-            VAL_STYLE_LAMBDA * avg_style +
-            VAL_PERCEPTUAL_LAMBDA * avg_perc
+            edge_lambda * avg_edge +
+            style_lambda * avg_style +
+            perc_lambda * avg_perc
         )
 
-        avg_val_ssim = ssim_met_tot / val_batches
-        avg_val_lpips = lpips_met_tot / val_batches
+        avg_val_ssim = ssim_tot / val_batches
+        avg_val_lpips = lpips_tot / val_batches
         elog["valG"].append(val_g)
 
         logger.info( # Validation logs
