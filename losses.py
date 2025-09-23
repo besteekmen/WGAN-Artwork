@@ -3,8 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torchvision.models as tvmodels
 
-from config import SCALES, HOLE_LAMBDA, VALID_LAMBDA, EPS, EDGE_RING, LPIPS_RING, VGG_RING
-from utils.utils import get_device
+from config import SCALES, HOLE_LAMBDA, VALID_LAMBDA, EPS, EDGE_RING, VGG_RING
 from torchmetrics.image.ssim import StructuralSimilarityIndexMeasure
 from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
 from torchmetrics.image.fid import FrechetInceptionDistance
@@ -14,8 +13,7 @@ def init_losses(device):
     """Initialize the losses for model networks."""
     lossStyle = VGG19StyleLoss().to(device)
     lossPerceptual = VGG16PerceptualLoss().to(device)
-    lossLPIPS = VGGLPIPSLoss().to(device)
-    return lossStyle, lossPerceptual, lossLPIPS
+    return lossStyle, lossPerceptual
 
 def init_metrics(device):
     """Initialize the metrics for model networks."""
@@ -136,30 +134,6 @@ class VGG16PerceptualLoss(nn.Module):
         for rf, ff in zip(real_features, fake_features):
             loss += self.criterion(rf, ff)
         return loss
-
-class VGGLPIPSLoss(nn.Module):
-    """Compute LPIPS on a ring around the boundary (frozen).
-    Attributes:
-    """
-    def __init__(self, ring_type="outer", size=LPIPS_RING):
-        super().__init__()
-        lpips = LearnedPerceptualImagePatchSimilarity(net_type="vgg").eval()
-        for param in lpips.parameters():
-            param.requires_grad = False
-        self.lpips = lpips
-        self.ring_type = ring_type
-        self.size = size
-
-    def forward(self, real, fake, mask_hole):
-        ring = get_ring(mask_hole, self.size)[self.ring_type].to(fake.dtype).float()
-
-        real = (real + 1.0) / 2.0
-        fake = (fake + 1.0) / 2.0
-
-        real = real * ring + EPS
-        fake = fake * ring + EPS
-
-        return self.lpips(real, fake).mean()
 
 def gradient_penalty(critic, real, fake, device):
     """Return gradient penalty for a given gradient

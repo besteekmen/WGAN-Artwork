@@ -46,7 +46,7 @@ def main():
     # To load a pretrained model, add file_name as parameter to setup_model
 
     # Init losses and quality metrics
-    lossStyle, lossPerceptual, lossLPIPS = init_losses(device)
+    lossStyle, lossPerceptual = init_losses(device)
     ssim, lpips, fid = init_metrics(device)
 
     # Set gradient scaler (mixed precision for faster training and low memory usage)
@@ -98,7 +98,7 @@ def main():
         nan_log_i = -999999
 
         # Set lambda schedules
-        adv_lambda = get_schedule(epoch, ADV_LAMBDA_SCHEDULE)
+        #adv_lambda = get_schedule(epoch, ADV_LAMBDA_SCHEDULE)
         perc_lambda = get_schedule(epoch, PERCEPTUAL_LAMBDA_SCHEDULE)
         style_lambda = get_schedule(epoch, STYLE_LAMBDA_SCHEDULE)
         edge_lambda = get_schedule(epoch, EDGE_LAMBDA_SCHEDULE)
@@ -230,7 +230,7 @@ def main():
                 continue
 
             # Final generator loss
-            losses["totalG"] = (adv_lambda * losses["adv"] +
+            losses["totalG"] = (ADV_LAMBDA * losses["adv"] +
                                 L1_LAMBDA * losses["l1"] +
                                 edge_lambda * losses["edge"] +
                                 TV_LAMBDA * losses["tv"] +
@@ -246,7 +246,7 @@ def main():
             if i % SAVE_FREQ == 0:
                 raw = {k: float(losses[k]) for k in ["adv", "l1", "edge", "tv", "style", "perceptual"]}
                 weighted = {
-                    "adv_w": adv_lambda * raw["adv"],
+                    "adv_w": ADV_LAMBDA * raw["adv"],
                     "l1_w": L1_LAMBDA * raw["l1"],
                     "edge_w": edge_lambda * raw["edge"],
                     "tv_w": TV_LAMBDA * raw["tv"],
@@ -318,7 +318,7 @@ def main():
 
         with torch.no_grad():
             ssim_met_tot, lpips_met_tot = 0.0, 0.0
-            l1_tot, edge_tot, style_tot, perc_tot, lpips_tot = 0.0, 0.0, 0.0, 0.0, 0.0
+            l1_tot, edge_tot, style_tot, perc_tot = 0.0, 0.0, 0.0, 0.0
             val_batches = 0
 
             for image, mask in val_loader:
@@ -369,14 +369,12 @@ def main():
         avg_edge = edge_tot / val_batches
         avg_style = style_tot / val_batches
         avg_perc = perc_tot / val_batches
-        #avg_lpips = lpips_tot / val_batches
 
         val_g = (
             L1_LAMBDA * avg_l1 +
             VAL_EDGE_LAMBDA * avg_edge +
             VAL_STYLE_LAMBDA * avg_style +
             VAL_PERCEPTUAL_LAMBDA * avg_perc
-            #LPIPS_LAMBDA * avg_lpips
         )
 
         avg_val_ssim = ssim_met_tot / val_batches
@@ -390,7 +388,6 @@ def main():
             f"Edge={avg_edge:.4f}, "
             f"Style={avg_style:.4f}, "
             f"Perc={avg_perc:.4f} | "
-            #f"Lpips={avg_lpips:.4f} | "
             f"SSIM={avg_val_ssim:.4f}, "
             f"LPIPS={avg_val_lpips:.4f}"
         )
