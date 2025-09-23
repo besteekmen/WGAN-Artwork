@@ -4,18 +4,19 @@ import torch.nn.functional as F
 import torchvision.models as tvmodels
 
 from config import SCALES, HOLE_LAMBDA, VALID_LAMBDA, EPS, EDGE_RING, VGG_RING
+from utils.utils import get_device
 from torchmetrics.image.ssim import StructuralSimilarityIndexMeasure
 from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
 from torchmetrics.image.fid import FrechetInceptionDistance
 from utils.vision_utils import downsample
 
-def init_losses(device):
+def init_losses(device=get_device()):
     """Initialize the losses for model networks."""
     lossStyle = VGG19StyleLoss().to(device)
     lossPerceptual = VGG16PerceptualLoss().to(device)
     return lossStyle, lossPerceptual
 
-def init_metrics(device):
+def init_metrics(device=get_device()):
     """Initialize the metrics for model networks."""
     # no need to normalize as unit ones are fed!
     ssim = StructuralSimilarityIndexMeasure(data_range=1.0).to(device)
@@ -197,11 +198,11 @@ def sobel(x):
     x_gray = x.mean(dim=1, keepdim=True) # convert [B, 3, H, W] in [-1, 1] to grayscale
     sobel_x = torch.tensor(
         [[1, 0, -1], [2, 0, -2], [1, 0, -1]],
-        dtype=x.dtype,
+        dtype=torch.float32,
         device=x.device).unsqueeze(0).unsqueeze(0)
     sobel_y = torch.tensor(
         [[1, 2, 1], [0, 0, 0], [-1, -2, -1]],
-        dtype=x.dtype,
+        dtype=torch.float32,
         device=x.device).unsqueeze(0).unsqueeze(0)
     grad_x = F.conv2d(x_gray, sobel_x, padding=1)
     grad_y = F.conv2d(x_gray, sobel_y, padding=1)
