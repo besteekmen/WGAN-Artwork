@@ -55,17 +55,17 @@ VALID_LAMBDA = 1.0 # smaller for known region (was 0.1)
 L1_LAMBDA = 1.0 # was 10.0 reconstruction loss weight
 TV_LAMBDA = 4e-4
 EDGE_LAMBDA_SCHEDULE = [ # was constant before as EDGE_LAMBDA = 0.05
-    (0, 0.0),
+    (0, 0.00),
     (10, 0.015),
     (20, 0.024),
     (30, 0.030)
 ]
 VAL_EDGE_LAMBDA = 0.10
 STYLE_LAMBDA_SCHEDULE = [ # was constant before as STYLE_LAMBDA = 60.0
-    (0, 18.0), # 24 x 16
-    (10, 36.0), # 36 x 16
-    (20, 48.0), # 44 x 16
-    (30, 60.0) # 52 x 16
+    (0, 18.0),
+    (10, 36.0),
+    (20, 48.0),
+    (30, 60.0)
 ]
 VAL_STYLE_LAMBDA = 60.0
 ADV_LAMBDA_SCHEDULE = [

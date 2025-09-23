@@ -41,8 +41,8 @@ def main():
     netG, globalD, localD = init_nets(device)
     optimG, optimGD, optimLD = init_optimizers(netG, globalD, localD)
     ema = init_ema(netG, device=device)
-    start_epoch = setup_model(netG, globalD, localD, optimG, optimGD, optimLD,
-                              check_path, ema, device)
+    start_epoch = setup_model(netG, globalD, localD,
+                              optimG, optimGD, optimLD, check_path, ema, device)
     # To load a pretrained model, add file_name as parameter to setup_model
 
     # Init losses and quality metrics
