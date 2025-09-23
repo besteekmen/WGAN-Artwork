@@ -53,22 +53,20 @@ IRR_RATIO_SCHEDULE = [ # irregular masks ratio was constant at 0.3 before
 HOLE_LAMBDA = 4.0 # full weight for missing region, reduced from 6.0 to avoid large gradients
 VALID_LAMBDA = 1.0 # smaller for known region (was 0.1)
 L1_LAMBDA = 1.0 # was 10.0 reconstruction loss weight
-TV_LAMBDA = 4e-4
+TV_LAMBDA = 0.0 #4e-4
 EDGE_LAMBDA_SCHEDULE = [ # was constant before as EDGE_LAMBDA = 0.05
     (0, 0.00),
     (10, 0.015),
     (20, 0.024),
     (30, 0.030)
 ]
-VAL_EDGE_LAMBDA = 0.10
 STYLE_LAMBDA_SCHEDULE = [ # was constant before as STYLE_LAMBDA = 60.0
     (0, 18.0),
     (10, 36.0),
     (20, 48.0),
     (30, 60.0)
 ]
-VAL_STYLE_LAMBDA = 60.0
-ADV_LAMBDA_SCHEDULE = [
+ADV_LAMBDA_SCHEDULE = [ # was constant before as ADV_LAMBDA = 0.005
     (0, 0.005),
     (30, 0.0075),
     (40, 0.01)
@@ -89,7 +87,6 @@ EDGE_RING_SCHEDULE = [
     (8, 4),
     (16, 2)
 ]
-VAL_PERCEPTUAL_LAMBDA = 0.05
 ADV_LAMBDA = 0.005 # small weight for adversarial loss (for stable training)
 PERCEPTUAL_LAMBDA = 0.1 # Reduced from 0.05 for smoother early training
 # If textures too blurry, try 0.1
