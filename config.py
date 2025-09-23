@@ -55,7 +55,7 @@ VALID_LAMBDA = 1.0 # smaller for known region (was 0.1)
 L1_LAMBDA = 1.0 # was 10.0 reconstruction loss weight
 TV_LAMBDA = 4e-4
 EDGE_LAMBDA_SCHEDULE = [ # was constant before as EDGE_LAMBDA = 0.05
-    (0, 0.00),
+    (0, 0.010),
     (10, 0.015),
     (20, 0.024),
     (30, 0.030)
@@ -77,6 +77,17 @@ PERCEPTUAL_LAMBDA_SCHEDULE = [ # was constant before as PERCEPTUAL_LAMBDA = 0.1
     (0, 0.1),
     (25, 0.075),
     (35, 0.05)
+]
+VGG_RING_SCHEDULE = [
+    (0, 48),
+    (4, 48),
+    (8, 32),
+    (16, 16),
+]
+EDGE_RING_SCHEDULE = [
+    (0, 6),
+    (8, 4),
+    (16, 2)
 ]
 VAL_PERCEPTUAL_LAMBDA = 0.05
 ADV_LAMBDA = 0.005 # small weight for adversarial loss (for stable training)

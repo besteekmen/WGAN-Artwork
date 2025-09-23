@@ -76,12 +76,15 @@ class VGG19StyleLoss(nn.Module):
         fake_features = []
         r = real
         f = fake
+        max_idx = max(self.layers)
         for idx, layer in enumerate(self.vgg):
             r = layer(r)
             f = layer(f)
             if idx in self.layers:
                 real_features.append(r)
                 fake_features.append(f)
+            if idx >= max_idx:
+                break
 
         loss = 0
         for rf, ff in zip(real_features, fake_features):
@@ -124,12 +127,15 @@ class VGG16PerceptualLoss(nn.Module):
         fake_features = []
         r = real
         f = fake
+        max_idx = max(self.layers)
         for idx, layer in enumerate(self.vgg):
             r = layer(r)
             f = layer(f)
             if idx in self.layers:
                 real_features.append(r)
                 fake_features.append(f)
+            if idx >= max_idx:
+                break
 
         loss = 0
         for rf, ff in zip(real_features, fake_features):
@@ -188,9 +194,8 @@ def lossMSL1(real, fake, mask):
     f_scale = downsample(fake, SCALES)
     m_scale = downsample(mask, SCALES)
     for ors, fs, ms in zip(r_scale, f_scale, m_scale):
-        hole = masked_l1(fs, ors, ms)
-        valid = masked_l1(fs, ors, 1.0 - ms)
-        multi_loss += HOLE_LAMBDA * hole + VALID_LAMBDA * valid
+        multi_loss += HOLE_LAMBDA * F.l1_loss(fs * ms, ors * ms) + \
+                      VALID_LAMBDA * F.l1_loss(fs * (1.0 - ms), ors * (1.0 - ms))
     return multi_loss / len(SCALES)
 
 def sobel(x):
