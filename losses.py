@@ -200,7 +200,7 @@ def lossMSL1(real, fake, mask):
 
 def sobel(x):
     """Applies sobel edge detector to input image."""
-    x_gray = x.mean(dim=1, keepdim=True) # convert [B, 3, H, W] in [-1, 1] to grayscale
+    x_gray = x.float().mean(dim=1, keepdim=True) # convert [B, 3, H, W] in [-1, 1] to grayscale
     sobel_x = torch.tensor(
         [[1, 0, -1], [2, 0, -2], [1, 0, -1]],
         dtype=torch.float32,
@@ -239,8 +239,8 @@ def lossEdgeRing(real, fake, mask_hole, size=EDGE_RING, ring_type="both"):
 
 def lossVGGRing(module, real, fake, mask_hole, size=VGG_RING, ring_type="outer"):
     ring = get_ring(mask_hole, size)[ring_type].to(fake.dtype).float()
-    r = real * ring + EPS
-    f = fake * ring + EPS
+    r = real * ring
+    f = fake * ring
     return module(r, f) * vgg_scale(ring)
 
 def lossTV(x, mask):
