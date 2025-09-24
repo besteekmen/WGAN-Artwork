@@ -213,7 +213,7 @@ def sobel(x):
         device=x.device).unsqueeze(0).unsqueeze(0)
     grad_x = F.conv2d(x_gray, sobel_x, padding=1)
     grad_y = F.conv2d(x_gray, sobel_y, padding=1)
-    return torch.sqrt(grad_x.float() ** 2 + grad_y.float() ** 2 + EPS).to(x.dtype) # added epsilon to avoid NaN grads
+    return torch.sqrt(grad_x ** 2 + grad_y ** 2 + EPS) # added epsilon to avoid NaN grads
 
 def dilation(x, size=3):
     # x = [B, 1, H, W] in [0, 1] i.e. mask_hole so mask 1, rest 0
