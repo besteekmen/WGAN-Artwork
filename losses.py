@@ -202,7 +202,7 @@ def lossMSL1(real, fake, mask):
 
 def sobel(x):
     """Applies sobel edge detector to input image."""
-    x_gray = x.float().mean(dim=1, keepdim=True) # convert [B, 3, H, W] in [-1, 1] to grayscale
+    x_gray = x.mean(dim=1, keepdim=True) # convert [B, 3, H, W] in [-1, 1] to grayscale
     sobel_x = torch.tensor(
         [[1, 0, -1], [2, 0, -2], [1, 0, -1]],
         dtype=torch.float32,
