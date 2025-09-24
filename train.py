@@ -193,13 +193,12 @@ def main():
                 losses["adv"] = adv_global + adv_local
 
                 # Pixel-wise L1 loss (multiscale, under amp)
-                losses["l1"] = lossMSL1(image, fake, mask_hole)
+                losses["l1"] = lossMSL1(image, composite, mask_hole)
 
                 # Edge loss
-                if epoch <=3:
-                    losses["edge"] = lossEdge(image, fake)
-                else:
-                    losses["edge"] = lossEdgeRing(image, fake, mask_hole, size=edge_ring, ring_type="outer")
+                losses["edge"] = lossEdgeRing(image, fake, mask_hole, size=edge_ring, ring_type="outer")
+                if epoch <3:
+                    losses["edge"] += 0.25 * lossEdge(image, fake)
 
                 # TV loss
                 losses["tv"] = lossTV(composite, mask_hole)
@@ -207,14 +206,13 @@ def main():
             # Style & Perceptual loss (no amp to avoid NaN, only full scale)
             with (full_precision()):
                 orig_full = clamp_f32(image)
-                if epoch <=3:
-                    comp_full = clamp_f32(composite)
+                comp_full = clamp_f32(composite)
+                if epoch <3:
                     sl = lossStyle(orig_full, comp_full)
                     pl = lossPerceptual(orig_full, comp_full)
                 else:
-                    fake_full = clamp_f32(fake)
-                    sl = lossVGGRing(lossStyle, orig_full, fake_full, mask_hole, size=vgg_ring, ring_type="outer")
-                    pl = lossVGGRing(lossPerceptual, orig_full, fake_full, mask_hole, size=vgg_ring, ring_type="outer")
+                    sl = lossVGGRing(lossStyle, orig_full, comp_full, mask_hole, size=vgg_ring, ring_type="inner")
+                    pl = lossVGGRing(lossPerceptual, orig_full, comp_full, mask_hole, size=vgg_ring, ring_type="inner")
             losses["style"] = sl
             losses["perceptual"] = pl
 
@@ -240,11 +238,11 @@ def main():
                 continue
 
             # Final generator loss
-            tv_scale = 0.0 if epoch <= 2 else 1.0
+            tv_lambda = 0.0 if epoch < 3 else TV_LAMBDA
             losses["totalG"] = (adv_lambda * losses["adv"] +
                                 L1_LAMBDA * losses["l1"] +
                                 edge_lambda * losses["edge"] +
-                                TV_LAMBDA * tv_scale * losses["tv"] +
+                                tv_lambda * losses["tv"] +
                                 style_lambda * losses["style"] +
                                 perc_lambda * losses["perceptual"])
 
@@ -260,7 +258,7 @@ def main():
                     "adv_w": adv_lambda * raw["adv"],
                     "l1_w": L1_LAMBDA * raw["l1"],
                     "edge_w": edge_lambda * raw["edge"],
-                    "tv_w": TV_LAMBDA * tv_scale * raw["tv"],
+                    "tv_w": tv_lambda * raw["tv"],
                     "style_w": style_lambda * raw["style"],
                     "perceptual_w": perc_lambda * raw["perceptual"]
                 }
@@ -349,26 +347,24 @@ def main():
 
                 with half_precision(): # no adv loss for validation!
                     # Pixel-wise L1 loss (multiscale, under amp)
-                    l1_loss = lossMSL1(image, fake, mask_hole)
+                    l1_loss = lossMSL1(image, composite, mask_hole)
 
                     # Edge loss
-                    if epoch <= 50:
-                        edge_loss = lossEdge(image, fake)
-                    else:
-                        edge_loss = lossEdgeRing(image, fake, mask_hole, size=edge_ring, ring_type="outer")
+                    edge_loss = lossEdgeRing(image, fake, mask_hole, size=edge_ring, ring_type="outer")
+                    if epoch < 3:
+                        edge_loss += 0.25 * lossEdge(image, fake)
 
                 # Style & Perceptual loss (no amp to avoid NaN, only full scale)
                 with full_precision():
                     orig_full = clamp_f32(image)
-                    if epoch <= 50:
-                        comp_full = clamp_f32(composite)
+                    comp_full = clamp_f32(composite)
+                    if epoch < 3:
                         vsl = lossStyle(orig_full, comp_full)
                         vpl = lossPerceptual(orig_full, comp_full)
                     else:
-                        fake_full = clamp_f32(fake)
-                        vsl = lossVGGRing(lossStyle, orig_full, fake_full, mask_hole, size=vgg_ring, ring_type="outer")
-                        vpl = lossVGGRing(lossPerceptual, orig_full, fake_full, mask_hole, size=vgg_ring,
-                                         ring_type="outer")
+                        vsl = lossVGGRing(lossStyle, orig_full, comp_full, mask_hole, size=vgg_ring, ring_type="inner")
+                        vpl = lossVGGRing(lossPerceptual, orig_full, comp_full, mask_hole, size=vgg_ring,
+                                         ring_type="inner")
 
                 # Loss totals for averaging
                 l1_tot += l1_loss.item()

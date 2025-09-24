@@ -46,16 +46,16 @@ class CoarseGenerator(nn.Module):
         super(CoarseGenerator, self).__init__()
         self.encoder = nn.Sequential(
             # 1st layer
-            nn.Conv2d(in_channels, G_HIDDEN, 5, stride=1, padding=2), # 64x64
+            nn.Conv2d(in_channels, G_HIDDEN, 5, stride=1, padding=2), # [B, 64, 256, 256]
             nn.ReLU(inplace=True),
             # inplace ReLU is used to prevent 'Out of memory', do not use in case of an error
             # Source: https://discuss.pytorch.org/t/guidelines-for-when-and-why-one-should-set-inplace-true/50923
             # 2nd layer
-            nn.Conv2d(G_HIDDEN, G_HIDDEN * 2, 3, stride=2, padding=1), # 32x32
+            nn.Conv2d(G_HIDDEN, G_HIDDEN * 2, 3, stride=2, padding=1), # [B, 128, 128, 128]
             nn.InstanceNorm2d(G_HIDDEN * 2, affine=True), # --> replaced BatchNorm2d
             nn.ReLU(inplace=True),
             # 3rd layer
-            nn.Conv2d(G_HIDDEN * 2, G_HIDDEN * 4, 3, stride=2, padding=1), # 16x16
+            nn.Conv2d(G_HIDDEN * 2, G_HIDDEN * 4, 3, stride=2, padding=1), # [B, 256, 64, 64]
             nn.InstanceNorm2d(G_HIDDEN * 4, affine=True), # --> replaced BatchNorm2d
             nn.ReLU(inplace=True)
         )
@@ -113,13 +113,13 @@ class FineGenerator(nn.Module):
         super(FineGenerator, self).__init__()
         self.encoder = nn.Sequential(
             # 1st layer
-            conv_block(in_channels, G_HIDDEN, 5, padding=2), # 64x64
+            conv_block(in_channels, G_HIDDEN, 5, padding=2), # 256x256
             nn.ReLU(inplace=True),
             # 2nd layer
-            conv_block(G_HIDDEN, G_HIDDEN * 2, 3, stride=2, padding=1), # 32x32
+            conv_block(G_HIDDEN, G_HIDDEN * 2, 3, stride=2, padding=1), # 128x128
             nn.ReLU(inplace=True),
             # 3rd layer
-            conv_block(G_HIDDEN * 2, G_HIDDEN * 4, 3, stride=2, padding=1), # 16x16
+            conv_block(G_HIDDEN * 2, G_HIDDEN * 4, 3, stride=2, padding=1), # 64x64
             nn.ReLU(inplace=True)
         )
         self.middle = nn.Sequential(

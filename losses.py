@@ -1,3 +1,5 @@
+import random
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -238,7 +240,8 @@ def lossEdgeRing(real, fake, mask_hole, size=EDGE_RING, ring_type="both"):
     return masked_l1(sobel(fake), sobel(real), ring)
 
 def lossVGGRing(module, real, fake, mask_hole, size=VGG_RING, ring_type="outer"):
-    ring = get_ring(mask_hole, size)[ring_type].to(fake.dtype).float()
+    jit = int(torch.randint(-1, 2, (1,), device=mask_hole.device).item())
+    ring = get_ring(mask_hole, max(size + jit, 0))[ring_type].to(fake.dtype).float()
     r = real * ring
     f = fake * ring
     return module(r, f) * vgg_scale(ring)
