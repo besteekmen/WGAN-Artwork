@@ -191,15 +191,15 @@ def main():
                 losses["adv"] = adv_global + adv_local
 
                 # Pixel-wise L1 loss (multiscale, under amp)
-                losses["l1"] = lossMSL1(image, composite, mask_hole)
+                losses["l1"] = lossMSL1(image, fake, mask_hole)
 
                 # Edge loss
                 losses["edge"] = lossEdge(image, fake)
 
             # Style & Perceptual loss (no amp to avoid NaN, only full scale)
-            with (full_precision()):
+            with full_precision():
+                comp_full = clamp_f32(composite) # reused composite
                 orig_full = clamp_f32(image)
-                comp_full = clamp_f32(composite)
                 sl = lossStyle(orig_full, comp_full)
                 pl = lossPerceptual(orig_full, comp_full)
             losses["style"] = sl
@@ -332,15 +332,15 @@ def main():
 
                 with half_precision(): # no adv loss for validation!
                     # Pixel-wise L1 loss (multiscale, under amp)
-                    l1_loss = lossMSL1(image, composite, mask_hole)
+                    l1_loss = lossMSL1(image, fake, mask_hole)
 
                     # Edge loss
                     edge_loss = lossEdge(image, fake)
 
                 # Style & Perceptual loss (no amp to avoid NaN, only full scale)
                 with full_precision():
+                    comp_full = clamp_f32(composite) # reused composite
                     orig_full = clamp_f32(image)
-                    comp_full = clamp_f32(composite)
                     vsl = lossStyle(orig_full, comp_full)
                     vpl = lossPerceptual(orig_full, comp_full)
 
