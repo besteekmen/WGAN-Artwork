@@ -9,7 +9,7 @@ from torch import amp
 
 # Project specific modules
 from config import *
-from losses import gradient_penalty, init_losses, lossMSL1, init_metrics, lossEdgeRing, lossVGGRing, lossTV, lossEdge
+from losses import gradient_penalty, init_losses, lossMSL1, init_metrics, lossEdge
 from models.model_builder import init_optimizers, init_nets, save_checkpoint, setup_model, forward_pass, init_ema, \
     save_ema
 from utils.utils import to_unit, set_seed, get_device, print_device, make_run_directory, half_precision, \
@@ -102,8 +102,6 @@ def main():
         perc_lambda = get_schedule(epoch, PERCEPTUAL_LAMBDA_SCHEDULE)
         style_lambda = get_schedule(epoch, STYLE_LAMBDA_SCHEDULE)
         edge_lambda = get_schedule(epoch, EDGE_LAMBDA_SCHEDULE)
-        vgg_ring = int(get_schedule(epoch, VGG_RING_SCHEDULE))
-        edge_ring = int(get_schedule(epoch, EDGE_RING_SCHEDULE))
         irr_ratio = get_schedule(epoch, IRR_RATIO_SCHEDULE)
 
         # Set training mode
@@ -196,31 +194,19 @@ def main():
                 losses["l1"] = lossMSL1(image, composite, mask_hole)
 
                 # Edge loss
-                losses["edge"] = lossEdgeRing(image, fake, mask_hole, size=edge_ring, ring_type="outer")
-                if epoch <3:
-                    losses["edge"] += 0.25 * lossEdge(image, fake)
-
-                # TV loss
-                losses["tv"] = lossTV(composite, mask_hole)
+                losses["edge"] = lossEdge(image, fake)
 
             # Style & Perceptual loss (no amp to avoid NaN, only full scale)
             with (full_precision()):
                 orig_full = clamp_f32(image)
                 comp_full = clamp_f32(composite)
-                if epoch <3:
-                    sl = lossStyle(orig_full, comp_full)
-                    pl = lossPerceptual(orig_full, comp_full)
-                else:
-                    sl = lossVGGRing(lossStyle, orig_full, comp_full, mask_hole, size=vgg_ring, ring_type="inner")
-                    pl = lossVGGRing(lossPerceptual, orig_full, comp_full, mask_hole, size=vgg_ring, ring_type="inner")
-                    if epoch <5:
-                        sl *= 0.25
-                        pl *= 0.25
+                sl = lossStyle(orig_full, comp_full)
+                pl = lossPerceptual(orig_full, comp_full)
             losses["style"] = sl
             losses["perceptual"] = pl
 
             # DEBUG only: Check for loss values to find the cause of NaN
-            all_terms = [losses["adv"], losses["l1"], losses["edge"], losses["tv"], sl, pl]
+            all_terms = [losses["adv"], losses["l1"], losses["edge"], sl, pl]
             with_nan = (not torch.isfinite(fake).all()) or (not all(torch.isfinite(x) for x in all_terms))
 
             if with_nan:
@@ -229,7 +215,6 @@ def main():
                                     f"adv={float(losses['adv']) if torch.isfinite(losses['adv']) else 'NaN'} "
                                     f"l1={float(losses['l1']) if torch.isfinite(losses['l1']) else 'NaN'} "
                                     f"edge={float(losses['edge']) if torch.isfinite(losses['edge']) else 'NaN'} "
-                                    f"tv={float(losses['tv']) if torch.isfinite(losses['tv']) else 'NaN'} "
                                     f"style={float(losses['style']) if torch.isfinite(losses['style']) else 'NaN'} "
                                     f"perceptual={float(losses['perceptual']) if torch.isfinite(losses['perceptual']) else 'NaN'}")
                     train_tqdm.write(message_skip)
@@ -241,11 +226,9 @@ def main():
                 continue
 
             # Final generator loss
-            tv_lambda = 0.0 if epoch < 3 else TV_LAMBDA
             losses["totalG"] = (adv_lambda * losses["adv"] +
                                 L1_LAMBDA * losses["l1"] +
                                 edge_lambda * losses["edge"] +
-                                tv_lambda * losses["tv"] +
                                 style_lambda * losses["style"] +
                                 perc_lambda * losses["perceptual"])
 
@@ -256,12 +239,11 @@ def main():
             num_batches += 1
 
             if i % SAVE_FREQ == 0:
-                raw = {k: float(losses[k]) for k in ["adv", "l1", "edge", "tv", "style", "perceptual"]}
+                raw = {k: float(losses[k]) for k in ["adv", "l1", "edge", "style", "perceptual"]}
                 weighted = {
                     "adv_w": adv_lambda * raw["adv"],
                     "l1_w": L1_LAMBDA * raw["l1"],
                     "edge_w": edge_lambda * raw["edge"],
-                    "tv_w": tv_lambda * raw["tv"],
                     "style_w": style_lambda * raw["style"],
                     "perceptual_w": perc_lambda * raw["perceptual"]
                 }
@@ -353,21 +335,14 @@ def main():
                     l1_loss = lossMSL1(image, composite, mask_hole)
 
                     # Edge loss
-                    edge_loss = lossEdgeRing(image, fake, mask_hole, size=edge_ring, ring_type="outer")
-                    if epoch < 3:
-                        edge_loss += 0.25 * lossEdge(image, fake)
+                    edge_loss = lossEdge(image, fake)
 
                 # Style & Perceptual loss (no amp to avoid NaN, only full scale)
                 with full_precision():
                     orig_full = clamp_f32(image)
                     comp_full = clamp_f32(composite)
-                    if epoch < 3:
-                        vsl = lossStyle(orig_full, comp_full)
-                        vpl = lossPerceptual(orig_full, comp_full)
-                    else:
-                        vsl = lossVGGRing(lossStyle, orig_full, comp_full, mask_hole, size=vgg_ring, ring_type="inner")
-                        vpl = lossVGGRing(lossPerceptual, orig_full, comp_full, mask_hole, size=vgg_ring,
-                                         ring_type="inner")
+                    vsl = lossStyle(orig_full, comp_full)
+                    vpl = lossPerceptual(orig_full, comp_full)
 
                 # Loss totals for averaging
                 l1_tot += l1_loss.item()
