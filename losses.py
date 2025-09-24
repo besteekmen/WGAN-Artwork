@@ -242,9 +242,11 @@ def lossEdgeRing(real, fake, mask_hole, size=EDGE_RING, ring_type="both"):
 def lossVGGRing(module, real, fake, mask_hole, size=VGG_RING, ring_type="outer"):
     jit = int(torch.randint(-1, 2, (1,), device=mask_hole.device).item())
     ring = get_ring(mask_hole, max(size + jit, 0))[ring_type].to(fake.dtype).float()
-    r = real * ring
-    f = fake * ring
-    return module(r, f) * vgg_scale(ring)
+    ring = F.avg_pool2d(ring, kernel_size=7, stride=1, padding=3).clamp(0,1)
+
+    r = real
+    f = fake * ring + fake.detach() * (1.0 - ring)
+    return module(r, f) # * vgg_scale(ring)
 
 def lossTV(x, mask):
     """Return Total Variation (how much neighbours change).

@@ -213,6 +213,9 @@ def main():
                 else:
                     sl = lossVGGRing(lossStyle, orig_full, comp_full, mask_hole, size=vgg_ring, ring_type="inner")
                     pl = lossVGGRing(lossPerceptual, orig_full, comp_full, mask_hole, size=vgg_ring, ring_type="inner")
+                    if epoch <5:
+                        sl *= 0.25
+                        pl *= 0.25
             losses["style"] = sl
             losses["perceptual"] = pl
 

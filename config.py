@@ -77,14 +77,16 @@ PERCEPTUAL_LAMBDA_SCHEDULE = [ # was constant before as PERCEPTUAL_LAMBDA = 0.1
     (35, 0.05)
 ]
 VGG_RING_SCHEDULE = [
-    (3, 6),
-    (8, 10),
-    (15, 14)
+    (0, 0),
+    (3, 8),
+    (5, 12),
+    (8, 16)
 ]
 EDGE_RING_SCHEDULE = [
-    (0, 2),
-    (8, 3),
-    (15, 4)
+    (0, 3),
+    (3, 8),
+    (5, 12),
+    (8, 16)
 ]
 ADV_LAMBDA = 0.005 # small weight for adversarial loss (for stable training)
 PERCEPTUAL_LAMBDA = 0.1 # Reduced from 0.05 for smoother early training
