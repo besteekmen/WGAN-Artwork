@@ -5,6 +5,7 @@ from torch import optim
 from torch_ema import ExponentialMovingAverage
 
 from models.generator import Generator
+from models.aot_generator import AOTGenerator
 from models.discriminator import GlobalDiscriminator, LocalDiscriminator
 from models.weights_init import weights_init_normal, bias_init_gate
 from utils.utils import get_device
@@ -14,7 +15,8 @@ def init_nets(device=None):
     """Initialize the networks on the current device."""
     if device is None:
         device = get_device()
-    netG = Generator().to(device)
+    #netG = Generator().to(device)
+    netG = AOTGenerator().to(device)
     globalD = GlobalDiscriminator().to(device)
     localD = LocalDiscriminator().to(device)
     return netG, globalD, localD
@@ -22,8 +24,8 @@ def init_nets(device=None):
 def init_optimizers(netG, globalD, localD):
     """Initialize the optimizers for model networks."""
     optimG = optim.Adam(netG.parameters(), lr=LR_G, betas=OPTIM_BETAS)
-    optimGD = optim.Adam(globalD.parameters(), lr=LR_D, betas=OPTIM_BETAS)
-    optimLD = optim.Adam(localD.parameters(), lr=LR_D, betas=OPTIM_BETAS)
+    optimGD = optim.Adam(globalD.parameters(), lr=2e-4, betas=OPTIM_BETAS)
+    optimLD = optim.Adam(localD.parameters(), lr=2e-4, betas=OPTIM_BETAS)
     return optimG, optimGD, optimLD
 
 def init_ema(netG, decay=0.999, device=None):
@@ -57,8 +59,8 @@ def setup_model(netG, globalD, localD, optimG, optimGD, optimLD,
 
 def init_model(netG, globalD, localD, optimG, optimGD, optimLD):
     """Initialize the model with new weights."""
-    netG.apply(weights_init_normal)
-    netG.upsample_init()  # used to avoid initial patchy results
+    #netG.apply(weights_init_normal)
+    #netG.upsample_init()  # used to avoid initial patchy results
     #netG.apply(bias_init_gate) # start gates open for better detail flow
     # print(netG) # DEBUG only: causes repetitive printing
     globalD.apply(weights_init_normal)
