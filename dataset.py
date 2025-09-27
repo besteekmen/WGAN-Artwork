@@ -90,12 +90,12 @@ class CroppedImageDataset(Dataset):
         print(f"Found {len(all_crops)} crop images.")
         return all_crops
 
-def generate_square_mask(height, width, rand=None,
+def generate_square_mask(height, width, rand=None, p_size=0.6,
                          p_rotate = 0.5, max_angle = 30.0):
     """Create a random size and random location square mask."""
     rand = rand or random
     # %60 small/medium and %40 large
-    if rand.random() < 0.6:
+    if rand.random() < p_size:
         low, high = min(height, width) // 6, min(height, width) // 3
     else:
         low, high = min(height, width) // 3, min(height, width) // 2

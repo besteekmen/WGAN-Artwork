@@ -1,9 +1,16 @@
 import os
+import random
 import torch
 import torch.nn.functional as F
 import torchvision.utils as vutils
+from PIL import ImageOps
+import PIL.Image as PILImage
 from matplotlib import pyplot as plt
-from config import LOCAL_PATCH_SIZE, SCALES, BATCH_SIZE, JITTER
+from torchvision import transforms
+
+from config import LOCAL_PATCH_SIZE, SCALES, BATCH_SIZE, JITTER, SEED
+from dataset import generate_square_mask
+
 
 def downsample(img, scales=None):
     """Return a list of images downsampled to different scales."""
@@ -76,17 +83,28 @@ def sample_offset(batch_size: int = BATCH_SIZE, jitter: int = JITTER, device=Non
 
 def set_fixed(train_dataset, batch_size: int = BATCH_SIZE, device=None):
     """Create a fixed set of samples for consistent epoch visualization."""
+    transform = transforms.Compose([
+        transforms.ToTensor(),
+        transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
+    ])
+
+    rand = random.Random(SEED)
+    paths = getattr(train_dataset, 'crop_paths', [])[:batch_size]
+
     fixed_masked = []
     fixed_image = []
     fixed_mask_hole = []
-    for i in range(min(batch_size, len(train_dataset))):
-        img, mask = train_dataset[i]  # mask: [2, H, W] (1=known, 0=hole)
-        # half or less irregular? same style pics?
-        shape = torch.randint(0, 2, (1,), device=mask.device).item()
-        mask = mask[shape].unsqueeze(0)  # mask: [1, H, W]
 
-        fixed_masked.append((img * mask).unsqueeze(0))  # create the masked sample
-        fixed_image.append(img.unsqueeze(0))  # ground truth
+    for p in paths:
+        with PILImage.open(p) as img:
+            img = ImageOps.exif_transpose(img).convert('RGB')
+            x = transform(img)
+        _, height, width = x.shape
+
+        mask = generate_square_mask(height, width, rand=rand, p_size=0.4)
+
+        fixed_masked.append((x * mask).unsqueeze(0))  # create the masked sample
+        fixed_image.append(x.unsqueeze(0))  # ground truth
         fixed_mask_hole.append((1.0 - mask).unsqueeze(0))  # hole mask (1=hole, 0=known)
 
     fixed_masked = torch.cat(fixed_masked, dim=0).to(device)
