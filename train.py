@@ -6,6 +6,7 @@ from datetime import datetime
 from tqdm import tqdm
 from multiprocessing import freeze_support
 from torch import amp
+from time import perf_counter
 
 # Project specific modules
 from config import *
@@ -36,6 +37,8 @@ def main():
     # CUDNN setups
     cudnn.benchmark = True # set False if strange OOM (Out of memory) occurs
     # cudnn.deterministic = True # for exact reproducibility, disable benchmark
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
 
     # Initialize or load the model
     netG, globalD, localD = init_nets(device)
@@ -85,6 +88,11 @@ def main():
     best_fid = float("inf")
     early_stopping = False
 
+    data_time_ema = None
+    iter_time_ema = None
+    time_beta =0.9
+    last_end = perf_counter()
+
     for epoch in range(start_epoch, EPOCH_NUM):
         # print(torch.cuda.memory_allocated()) # DEBUG only: check GPU memory
         train_tqdm = tqdm(
@@ -92,7 +100,9 @@ def main():
             total=len(train_loader),
             desc=f"Epoch {epoch + 1} / {EPOCH_NUM}", # Start epoch with 1
             leave=False,
-            ncols=100
+            dynamic_ncols=True,
+            mininterval=0.2
+            #ncols=100
         )
 
         nan_log_i = -999999
@@ -108,7 +118,10 @@ def main():
         netG.train(); globalD.train(); localD.train()
 
         # Initialize loss sums
-        g_tot, d_tot, gd_tot, ld_tot = 0.0, 0.0, 0.0, 0.0
+        g_tot = torch.zeros((), device=device)
+        d_tot = torch.zeros((), device=device)
+        gd_tot = torch.zeros((), device=device)
+        ld_tot = torch.zeros((), device=device)
         num_batches = 0
 
         if torch.cuda.is_available():
@@ -118,6 +131,9 @@ def main():
             image, mask_hole = prepare_batch((image, mask), device,
                                                    irr_ratio = irr_ratio,
                                                    non_blocking = True)
+            now = perf_counter()
+            data_time = now - last_end
+            start_iter = now
 
             # Create a dictionary to keep batch losses
             losses = {}
@@ -232,10 +248,10 @@ def main():
                                 style_lambda * losses["style"] +
                                 perc_lambda * losses["perceptual"])
 
-            g_tot += losses["totalG"].item()
-            d_tot += losses["totalD"].item()
-            gd_tot += losses["globalD"].item()
-            ld_tot += losses["localD"].item()
+            g_tot += losses["totalG"].detach()
+            d_tot += losses["totalD"].detach()
+            gd_tot += losses["globalD"].detach()
+            ld_tot += losses["localD"].detach()
             num_batches += 1
 
             if i % SAVE_FREQ == 0:
@@ -262,35 +278,53 @@ def main():
             # -------------------------------------------------------------------
             # Step 3: Batch logging and visualizing
             # -------------------------------------------------------------------
-            blog["totalG"].append(losses["totalG"].item())
-            blog["totalD"].append(losses["totalD"].item())
-            blog["globalD"].append(losses["globalD"].item())
-            blog["localD"].append(losses["localD"].item())
+            iter_time = perf_counter() - start_iter
+
+            if data_time_ema is None:
+                data_time_ema = data_time
+                iter_time_ema = iter_time
+            else:
+                data_time_ema = time_beta*data_time_ema + (1-time_beta)*data_time
+                iter_time_ema = time_beta*iter_time_ema + (1-time_beta)*iter_time
 
             # Print the progress and batch losses (once in every 100 batch)
             if i % SAVE_FREQ == 0:
+                if is_cuda():
+                    torch.cuda.synchronize()
+                iter_time_sync = perf_counter() - start_iter
+
                 train_tqdm.set_postfix({
-                    'G': losses["totalG"].item(),
-                    'D': losses["totalD"].item(),
-                    'gD': losses["globalD"].item(),
-                    'lD': losses["localD"].item()
+                    'G': float(losses["totalG"].detach().cpu()),
+                    'D': float(losses["totalD"].detach().cpu()),
+                    'gD': float(losses["globalD"].detach().cpu()),
+                    'lD': float(losses["localD"].detach().cpu()),
+                    'dt': f'{data_time_ema*1000:.1f}ms',
+                    'it': f'{iter_time_ema*1000:.1f}ms'
                 })
+
+                blog["totalG"].append(losses["totalG"].item())
+                blog["totalD"].append(losses["totalD"].item())
+                blog["globalD"].append(losses["globalD"].item())
+                blog["localD"].append(losses["localD"].item())
 
                 # Save the current batch (16) images: [image | masked | composite]
                 with torch.no_grad():
                     masked = image * (1.0 - mask_hole)
                     save_images(to_unit(image), to_unit(masked), to_unit(composite), 3,  # horizontal stack per sample using width dimension
                                 1, out_path, f'comparison_epoch({epoch})_batch({i}).png')
+                last_end = perf_counter()
+            else:
+                last_end = perf_counter()
             global_step += 1
 
         # -----------------------------------------------------------------------
         # Epoch logging: Training
         # -----------------------------------------------------------------------
         # Compute and store average losses for the current epoch
-        gmean = g_tot / max(1, num_batches)
-        dmean = d_tot / max(1, num_batches)
-        gdmean = gd_tot / max(1, num_batches)
-        ldmean = ld_tot / max(1, num_batches)
+        gmean = float((g_tot / max(1, num_batches)).cpu())
+        dmean = float((d_tot / max(1, num_batches)).cpu())
+        gdmean = float((gd_tot / max(1, num_batches)).cpu())
+        ldmean = float((ld_tot / max(1, num_batches)).cpu())
 
         elog["totalG"].append(gmean)
         elog["totalD"].append(dmean)

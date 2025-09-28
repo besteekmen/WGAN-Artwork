@@ -21,12 +21,14 @@ class AOTGenerator(nn.Module):
             nn.Conv2d(G_HIDDEN * 2, G_HIDDEN * 4, 4, stride=2, padding=1),  # [B, 256, 64, 64]
             nn.ReLU(inplace=True)
         )
-        self.middle = nn.Sequential(
-            AOTBlock(G_HIDDEN * 4),
-            AOTBlock(G_HIDDEN * 4),
-            AOTBlock(G_HIDDEN * 4),
-            AOTBlock(G_HIDDEN * 4)
-        )
+
+        self.aot1 = AOTBlock(G_HIDDEN * 4)
+        #self.aot2 = AOTBlock(G_HIDDEN * 4)
+        #self.art = ARTBlock(G_HIDDEN * 4)
+        self.ced = CEDBlock(G_HIDDEN * 4, detach_orientation=True)
+        self.aot3 = AOTBlock(G_HIDDEN * 4)
+        self.aot4 = AOTBlock(G_HIDDEN * 4)
+
         self.decoder = nn.Sequential(
             # 7th layer
             nn.ConvTranspose2d(G_HIDDEN * 4, G_HIDDEN * 2, 4, stride=2, padding=1, bias=True),
@@ -42,7 +44,7 @@ class AOTGenerator(nn.Module):
         self.apply(weights_init_normal)
 
         for m in self.modules():
-            if isinstance(m, ARTBlock):
+            if isinstance(m, (ARTBlock, CEDBlock)):
                 m.reset()
 
     def forward(self, x, mask):
@@ -54,25 +56,11 @@ class AOTGenerator(nn.Module):
         masked_input = x * (1.0 - mask)
         x = torch.cat((masked_input, mask), dim=1)
         x = self.encoder(x)
-        x = self.middle(x)
-
-        # Context aware AdaIN
-        #hole = F.max_pool2d(mask, kernel_size=4, stride=4, ceil_mode=True) # [B, 1, H, W]
-        #known = 1.0 - hole # known pixels (0=hole, 1=known)
-
-        #def masked_moments(feat, m, eps=1e-6):
-        #    denom = m.sum((2,3), keepdim=True).clamp_min(1.0)
-        #    mu = (feat * m).sum((2,3), keepdim=True) / denom
-        #    var = ((feat - mu) ** 2 * m).sum((2,3), keepdim=True) / denom
-        #    std = (var + eps).sqrt()
-        #    return mu, std
-
-        #mu_k, std_k = masked_moments(x, known) # stats of surround
-        #mu_h, std_h = masked_moments(x, hole) # stats of hole
-
-        #h_hole = (x - mu_h) / std_h * std_c + mu_c
-        #x = x * (1.0 - hole) + h_hole * hole
-
+        x = self.aot1(x)
+        #x = self.aot2(x)
+        x = self.ced(x, mask)
+        x = self.aot3(x)
+        x = self.aot4(x)
         x = self.decoder(x)
         return torch.tanh(x)
 
@@ -103,7 +91,7 @@ class AOTBlock(nn.Module):
             nn.ReLU(inplace=True)
         )
         self.block3 = nn.Sequential(
-            nn.ReflectionPad2d(8),
+            nn.ReflectionPad2d(8), # try 12 later!
             nn.Conv2d(dim, dim // 4, 3, padding=0, dilation=8),
             nn.ReLU(inplace=True)
         )
@@ -137,13 +125,14 @@ def AOTfilter(channel, kernel, norm=None):
     k = torch.tensor(kernel, dtype=torch.float32)
     if norm is not None:
         k = k / float(norm)
-    conv = nn.Conv2d(channel, channel, 3, padding=1, groups=channel, bias=False)
+    conv = nn.Conv2d(channel, channel, 3, padding=0, groups=channel, bias=False)
+    pad = nn.ReflectionPad2d(1)
     with torch.no_grad():
         weight = k.view(1, 1, 3, 3).expand(channel, 1, 3, 3).clone()
         conv.weight.copy_(weight)
     for p in conv.parameters():
         p.requires_grad = False
-    return conv
+    return nn.Sequential(pad, conv)
 
 class ARTBlock(nn.Module):
     def __init__(self, dim):
@@ -181,16 +170,21 @@ class ARTBlock(nn.Module):
 
     @torch.no_grad()
     def reset(self):
-        device = self.blur.weight.device
-        dtype = self.blur.weight.dtype
+        blur_conv = self.blur[1]
+        sobelx_conv = self.sobelx[1]
+        sobely_conv = self.sobely[1]
+
+        device = blur_conv.weight.device
+        dtype = blur_conv.weight.dtype
+        in_channels = blur_conv.in_channels
+
         blur = torch.tensor([[1, 2, 1], [2, 4, 2], [1, 2, 1]], dtype=dtype, device=device) / 16.0
         sobelx = torch.tensor([[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]], dtype=dtype, device=device)
         sobely = torch.tensor([[-1, -2, -1], [0, 0, 0], [1, 2, 1]], dtype=dtype, device=device)
-        in_channels = self.blur.in_channels
 
-        self.blur.weight.copy_(blur.view(1, 1, 3, 3).expand(in_channels, 1, 3, 3))
-        self.sobelx.weight.copy_(sobelx.view(1, 1, 3, 3).expand(in_channels, 1, 3, 3))
-        self.sobely.weight.copy_(sobely.view(1, 1, 3, 3).expand(in_channels, 1, 3, 3))
+        blur_conv.weight.copy_(blur.view(1, 1, 3, 3).expand(in_channels, 1, 3, 3))
+        sobelx_conv.weight.copy_(sobelx.view(1, 1, 3, 3).expand(in_channels, 1, 3, 3))
+        sobely_conv.weight.copy_(sobely.view(1, 1, 3, 3).expand(in_channels, 1, 3, 3))
 
     def _feat_mask(self, mask, dims):
         """Downscale mask to feature dimensions."""
@@ -227,4 +221,87 @@ class ARTBlock(nn.Module):
         gate = torch.sigmoid(aot_layer_norm(self.gate(x)))
         gated = gate * band
         return x * (1 - gated) + out * gated
+
+class CEDBlock(nn.Module):
+    def __init__(self, dim, steps=1, tau=0.2, alpha=0.8, beta=0.15, detach_orientation=False):
+        super().__init__()
+        self.steps = steps
+        self.tau = tau
+        self.alpha = alpha
+        self.beta = beta
+        self.detach_orientation = detach_orientation
+
+        # Gradients and blur for stable orientation
+        self.blur = AOTfilter(dim, [[1, 2, 1], [2, 4, 2], [1, 2, 1]], norm=16.0)
+        self.gx = AOTfilter(dim, [[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]])
+        self.gy = AOTfilter(dim, [[-1, -2, -1], [0, 0, 0], [1, 2, 1]])
+
+        # Second-derivative bases
+        self.dxx = AOTfilter(dim, [[1, -2, 1], [2, -4, 2], [1, -2, 1]])
+        self.dyy = AOTfilter(dim, [[1, 2, 1], [-2, -4, -2], [1, 2, 1]])
+        self.dxy = AOTfilter(dim, [[1, 0, -1], [0, 0, 0], [-1, 0, 1]])
+
+    @torch.no_grad()
+    def reset(self):
+        def _load(seq, k):
+            conv = seq[1]
+            C = conv.in_channels
+            device = conv.weight.device
+            dtype = conv.weight.dtype
+            w = torch.tensor(k, device=device, dtype=dtype).view(1, 1, 3, 3).expand(C, 1, 3, 3)
+            conv.weight.copy_(w)
+
+        _load(self.blur, [[1/16, 2/16, 1/16], [2/16, 4/16, 2/16], [1/16, 2/16, 1/16]])
+        _load(self.gx, [[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]])
+        _load(self.gy, [[-1, -2, -1], [0, 0, 0], [-1, 0, 1]])
+
+        _load(self.dxx, [[1, -2, 1], [2, -4, 2], [1, -2, 1]])
+        _load(self.dyy, [[1, 2, 1], [-2, -4, -2], [1, 2, 1]])
+        _load(self.dxy, [[1, 0, -1], [0, 0, 0], [-1, 0, 1]])
+
+    def _down_mask(self, mask, H, W):
+        """Downscale mask to feature dimensions."""
+        kH, kW = max(mask.size(2) // H, 1), max(mask.size(3) // W, 1)
+        down_mask = F.avg_pool2d(mask.float(), (kH, kW), (kH, kW))
+        down_mask = (down_mask > 0.5).float()[:, :, :H, :W]
+        down_mask = 1.0 - F.avg_pool2d(1.0 - down_mask, 3, 1, 1)
+        return down_mask.clamp_(0, 1)
+
+    def forward(self, x, mask=None):
+        B, C, H, W = x.shape
+
+        with torch.no_grad():
+            gx = self.blur(self.gx(x))
+            gy = self.blur(self.gy(x))
+            mean_x = gx.mean(1, keepdim=True)
+            mean_y = gy.mean(1, keepdim=True)
+            eps = 1e-6 if x.dtype == torch.float32 else 1e-4
+            magnitude = (mean_x**2 + mean_y**2).sqrt().clamp_min(eps)
+            vx, vy = mean_x / magnitude, mean_y / magnitude
+            if self.detach_orientation:
+                vx = vx.detach()
+                vy = vy.detach()
+            vxC, vyC = vx.expand_as(x), vy.expand_as(x)
+
+            c_par = torch.sigmoid(4.0 * magnitude).expand_as(x)
+            c_perp = 0.25 * (1.0 - c_par)
+            band = self._down_mask(mask, H, W) if mask is not None else None
+
+        for _ in range(self.steps):
+            dxx = self.dxx(x)
+            dyy = self.dyy(x)
+            dxy = self.dxy(x)
+
+            vxvx = vx * vx
+            vyvy = vy * vy
+            vxvy = vx * vy
+
+            d2v = vxvx * dxx + 2 * vxvy * dxy + vyvy * dyy # parallel
+            d2vp = vyvy * dxx - 2 * vxvy * dxy + vxvx * dyy # perpendicular
+            step = self.tau * (self.alpha*c_par*d2v + self.beta*c_perp*d2vp)
+            if band is not None:
+                step = step * band
+            x = x + step
+        return x
+
 
