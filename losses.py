@@ -4,6 +4,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torchvision.models as tvmodels
+from torchvision.models import VGG19_Weights, VGG16_Weights
 
 from config import SCALES, HOLE_LAMBDA, VALID_LAMBDA, EPS, EDGE_RING, VGG_RING
 from utils.utils import get_device
@@ -39,9 +40,7 @@ class VGG19StyleLoss(nn.Module):
     """
     def __init__(self, layers=None):
         super().__init__()
-        vgg = tvmodels.vgg19(pretrained=True).features.eval()
-        # TODO: try below (and the one in VGG16) for offline, and weights is preferred over pretrained now by torchvision
-        #vgg = tvmodels.vgg19(weights=VGG19_Weights.IMAGENET1K_V1).features.eval()
+        vgg = tvmodels.vgg19(weights=VGG19_Weights.IMAGENET1K_V1).features.eval()
         for param in vgg.parameters():
             param.requires_grad = False
         self.vgg = vgg
@@ -106,8 +105,7 @@ class VGG16PerceptualLoss(nn.Module):
     """
     def __init__(self, layers=None, resize=True):
         super().__init__()
-        vgg = tvmodels.vgg16(pretrained=True).features.eval()
-        #vgg = tvmodels.vgg16(weights=VGG16_Weights.IMAGENET1K_FEATURES).features.eval()
+        vgg = tvmodels.vgg16(weights=VGG16_Weights.IMAGENET1K_FEATURES).features.eval()
         for param in vgg.parameters():
             param.requires_grad = False
         self.vgg = vgg
