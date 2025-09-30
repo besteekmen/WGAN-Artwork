@@ -24,8 +24,8 @@ def init_nets(device=None):
 def init_optimizers(netG, globalD, localD):
     """Initialize the optimizers for model networks."""
     optimG = optim.Adam(netG.parameters(), lr=LR_G, betas=OPTIM_BETAS)
-    optimGD = optim.Adam(globalD.parameters(), lr=2e-4, betas=OPTIM_BETAS)
-    optimLD = optim.Adam(localD.parameters(), lr=2e-4, betas=OPTIM_BETAS)
+    optimGD = optim.Adam(globalD.parameters(), lr=LR_D, betas=OPTIM_BETAS)
+    optimLD = optim.Adam(localD.parameters(), lr=LR_D, betas=OPTIM_BETAS)
     return optimG, optimGD, optimLD
 
 def init_ema(netG, decay=0.999, device=None):

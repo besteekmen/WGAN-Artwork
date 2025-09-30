@@ -27,7 +27,7 @@ EPOCH_NUM = 50
 # If discriminator gets perfect quickly, generator gradients may vanish!
 # Hence make learning slower for D and faster for G (Contextual Attention GAN, Yu et al. 2018)
 LR_G = 1e-4 # generator learning rate, change to 1e-4 if NaN g loss
-LR_D = 8e-5 # discriminator learning rate, was also 1e-4, reduced for G to sharpen details
+LR_D = 2e-4 # discriminator learning rate, was also 1e-4, reduced for G to sharpen details
 OPTIM_BETAS = (0.0, 0.9)
 
 # --- Model hyperparameters ---
@@ -76,12 +76,6 @@ PERCEPTUAL_LAMBDA_SCHEDULE = [ # was constant before as PERCEPTUAL_LAMBDA = 0.1
     (25, 0.075),
     (35, 0.05)
 ]
-VGG_RING_SCHEDULE = [
-    (0, 0),
-    (3, 8),
-    (5, 12),
-    (8, 16)
-]
 EDGE_RING_SCHEDULE = [
     (0, 3),
     (3, 8),
@@ -95,7 +89,6 @@ GP_LAMBDA = 20.0 # WGAN-GP penalty weight
 SCALES = [1.0, 0.5, 0.25] # multiscale factors
 SCALE_WEIGHTS = [1.0, 0.5, 0.25] # multiscale factor weights
 EDGE_RING = 2
-VGG_RING = 3
 
 # --- Datasets and paths ---
 OUT_PATH = 'out'

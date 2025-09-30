@@ -21,6 +21,23 @@ def downsample(img, scales=None):
                           mode='bilinear',
                           align_corners=False) for s in scales]
 
+def dilation(x, size=3):
+    # x = [B, 1, H, W] in [0, 1] i.e. mask_hole so mask 1, rest 0
+    return F.max_pool2d(x, kernel_size=(2 * size + 1), stride=1, padding=size)
+
+def erosion(x, size=3):
+    return 1.0 - F.max_pool2d(1.0 - x, kernel_size=(2 * size + 1), stride=1, padding=size)
+
+def get_ring(x, size=3):
+    dil = dilation(x, size)
+    er = erosion(x, size)
+    ring = {
+        "inner": torch.clamp(x - er, 0.0, 1.0),
+        "outer": torch.clamp(dil - x, 0.0, 1.0),
+        "both": torch.clamp(dil - er, 0.0, 1.0)
+    }
+    return ring
+
 def crop_local_patch(images: torch.Tensor, masks_hole: torch.Tensor,
                      offsets: tuple[torch.Tensor, torch.Tensor],
                      pad_mode: str = 'reflect',

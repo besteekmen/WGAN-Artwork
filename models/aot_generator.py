@@ -3,6 +3,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from models.weights_init import weights_init_normal
 from config import *
+from utils.vision_utils import get_ring
+
 
 class AOTGenerator(nn.Module):
     def __init__(self, in_channels=4):
@@ -23,20 +25,19 @@ class AOTGenerator(nn.Module):
         )
 
         self.aot1 = AOTBlock(G_HIDDEN * 4)
-        #self.aot2 = AOTBlock(G_HIDDEN * 4)
-        #self.art = ARTBlock(G_HIDDEN * 4)
-        self.ced = CEDBlock(G_HIDDEN * 4, detach_orientation=True)
+        self.aot2 = AOTBlock(G_HIDDEN * 4)
         self.aot3 = AOTBlock(G_HIDDEN * 4)
         self.aot4 = AOTBlock(G_HIDDEN * 4)
+
+        #self.art = ARTBlock(G_HIDDEN * 4)
+        self.ced = CEDBlock(G_HIDDEN * 4, detach_orientation=True)
 
         self.decoder = nn.Sequential(
             # 7th layer
             nn.ConvTranspose2d(G_HIDDEN * 4, G_HIDDEN * 2, 4, stride=2, padding=1, bias=True),
-            #nn.Conv2d(G_HIDDEN * 2, G_HIDDEN * 2, 3, padding=1),
             nn.ReLU(inplace=True),
             # 8th layer
             nn.ConvTranspose2d(G_HIDDEN * 2, G_HIDDEN, 4, stride=2, padding=1, bias=True),
-            #nn.Conv2d(G_HIDDEN, G_HIDDEN, 3, padding=1),
             nn.ReLU(inplace=True),
             # 9th layer (to RGB)
             nn.Conv2d(G_HIDDEN, 3, 3, padding=1)
@@ -222,8 +223,8 @@ class ARTBlock(nn.Module):
         return x * (1 - gated) + out * gated
 
 class CEDBlock(nn.Module):
-    def __init__(self, dim, steps=1, tau=0.15, alpha=1e-3, C=0.05,
-                 m=2, rho=2, detach_orientation=True):
+    def __init__(self, dim, steps=1, tau=0.08, alpha=0.03, C=0.05,
+                 m=2, rho=1, detach_orientation=True):
         super().__init__()
         self.steps = steps # k, so total time: T = k * Δt
         self.tau = tau # explicit time step: Δt, better <0.25
@@ -243,6 +244,8 @@ class CEDBlock(nn.Module):
         self.dxx = AOTfilter(dim, [[1, -2, 1], [2, -4, 2], [1, -2, 1]])
         self.dyy = AOTfilter(dim, [[1, 2, 1], [-2, -4, -2], [1, 2, 1]])
         self.dxy = AOTfilter(dim, [[1, 0, -1], [0, 0, 0], [-1, 0, 1]])
+
+        #self.gate = nn.Sequential(nn.Conv2d(dim, dim, 1), nn.Sigmoid())
 
     @torch.no_grad()
     def reset(self):
@@ -274,15 +277,15 @@ class CEDBlock(nn.Module):
     def forward(self, x, mask=None):
         B, C, H, W = x.shape
         eps = 1e-6
-        band = self._down_mask(mask, H, W) if mask is not None else None
+        m = self._down_mask(mask, H, W) if mask is not None else None
 
         # 1) Structure tensor J = blur([gx;gy] [gx;gy]^T)
         x_sigma = self.blur(x)
         gx = self.gx(x_sigma) # [B, C, H, W]
         gy = self.gy(x_sigma)
-        j11 = (gx * gx).sum(1, keepdim=True) # [B, 1, H, W]
-        j12 = (gx * gy).sum(1, keepdim=True)
-        j22 = (gy * gy).sum(1, keepdim=True)
+        j11 = (gx * gx).mean(1, keepdim=True) # [B, 1, H, W]
+        j12 = (gx * gy).mean(1, keepdim=True)
+        j22 = (gy * gy).mean(1, keepdim=True)
 
         # integrate over ρ (rho) using repeated gaussian passes
         for _ in range(self.rho):
@@ -310,7 +313,6 @@ class CEDBlock(nn.Module):
         if self.detach_orientation:
             vx = vx.detach()
             vy = vy.detach()
-            #lambda_tang = lambda_tang.detach()
 
         # 3) Explicit Euler
         x_new = x
@@ -327,8 +329,14 @@ class CEDBlock(nn.Module):
             d2t = (vy * vy) * dxx - 2.0 * (vx * vy) * dxy + (vx * vx) * dyy # v⟂^T H v⟂ (along edge)
             step = self.tau * (lambda_tang * d2t + lambda_perp * d2n)
 
-            if band is not None:
-                step = step * band
+            if m is not None:
+                with torch.no_grad():
+                    ring = get_ring((m > 0.5).float(), size=2)["both"]
+                    soft_ring = F.avg_pool2d(ring, 5, 1, 2).clamp_(0, 1)
+
+                #strength = 0.35 * (1.0 - m) + 0.55 * m + 0.15 * soft_ring
+                step = step * (1.0 + 0.4 * soft_ring)
+
             x_new = x_new + step
         return x_new
 

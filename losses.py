@@ -6,12 +6,13 @@ import torch.nn.functional as F
 import torchvision.models as tvmodels
 from torchvision.models import VGG19_Weights, VGG16_Weights
 
-from config import SCALES, HOLE_LAMBDA, VALID_LAMBDA, EPS, EDGE_RING, VGG_RING
+from config import SCALES, HOLE_LAMBDA, VALID_LAMBDA, EPS, EDGE_RING
 from utils.utils import get_device
 from torchmetrics.image.ssim import StructuralSimilarityIndexMeasure
 from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
 from torchmetrics.image.fid import FrechetInceptionDistance
-from utils.vision_utils import downsample
+from utils.vision_utils import downsample, get_ring
+
 
 def init_losses(device=get_device()):
     """Initialize the losses for model networks."""
@@ -68,28 +69,22 @@ class VGG19StyleLoss(nn.Module):
         """
         real, fake: [B, 3, H, W] values in [-1, 1]
         """
-        real = (real + 1.0) / 2.0 # try using to_unit here!
+        real = (real + 1.0) / 2.0
         fake = (fake + 1.0) / 2.0
-        real = (real - self.mean) / self.std
-        fake = (fake - self.mean) / self.std
 
-        real_features = []
-        fake_features = []
-        r = real
-        f = fake
+        r = (real - self.mean) / self.std
+        f = (fake - self.mean) / self.std
+
+        loss = 0.0
         max_idx = max(self.layers)
         for idx, layer in enumerate(self.vgg):
-            r = layer(r)
-            f = layer(f)
+            with torch.no_grad():
+                r = layer(r)
+            f = layer(f)  # keep grads for fake layer
             if idx in self.layers:
-                real_features.append(r)
-                fake_features.append(f)
+                loss = loss + self.criterion(self.gram(r), self.gram(f))
             if idx >= max_idx:
                 break
-
-        loss = 0
-        for rf, ff in zip(real_features, fake_features):
-            loss += self.criterion(self.gram(rf), self.gram(ff))
         return loss
 
 class VGG16PerceptualLoss(nn.Module):
@@ -120,26 +115,19 @@ class VGG16PerceptualLoss(nn.Module):
         real = (real + 1.0) / 2.0
         fake = (fake + 1.0) / 2.0
 
-        real = (real - self.mean) / self.std
-        fake = (fake - self.mean) / self.std
+        r = (real - self.mean) / self.std
+        f = (fake - self.mean) / self.std
 
-        real_features = []
-        fake_features = []
-        r = real
-        f = fake
+        loss = 0.0
         max_idx = max(self.layers)
         for idx, layer in enumerate(self.vgg):
-            r = layer(r)
-            f = layer(f)
+            with torch.no_grad():
+                r = layer(r)
+            f = layer(f) # keep grads for fake layer
             if idx in self.layers:
-                real_features.append(r)
-                fake_features.append(f)
+                loss = loss + self.criterion(r, f)
             if idx >= max_idx:
                 break
-
-        loss = 0
-        for rf, ff in zip(real_features, fake_features):
-            loss += self.criterion(rf, ff)
         return loss
 
 def gradient_penalty(critic, real, fake, device):
@@ -213,38 +201,12 @@ def sobel(x):
     grad_y = F.conv2d(x_gray, sobel_y, padding=1)
     return torch.sqrt(grad_x ** 2 + grad_y ** 2 + EPS) # added epsilon to avoid NaN grads
 
-def dilation(x, size=3):
-    # x = [B, 1, H, W] in [0, 1] i.e. mask_hole so mask 1, rest 0
-    return F.max_pool2d(x, kernel_size=(2 * size + 1), stride=1, padding=size)
-
-def erosion(x, size=3):
-    return 1.0 - F.max_pool2d(1.0 - x, kernel_size=(2 * size + 1), stride=1, padding=size)
-
-def get_ring(x, size=3):
-    dil = dilation(x, size)
-    er = erosion(x, size)
-    ring = {
-        "inner": torch.clamp(x - er, 0.0, 1.0),
-        "outer": torch.clamp(dil - x, 0.0, 1.0),
-        "both": torch.clamp(dil - er, 0.0, 1.0)
-    }
-    return ring
-
 def lossEdge(real, fake):
     return F.l1_loss(sobel(real), sobel(fake)) # use functional l1, not class one
 
 def lossEdgeRing(real, fake, mask_hole, size=EDGE_RING, ring_type="both"):
     ring = get_ring(mask_hole, size)[ring_type].to(fake.dtype).float()
     return masked_l1(sobel(fake), sobel(real), ring)
-
-def lossVGGRing(module, real, fake, mask_hole, size=VGG_RING, ring_type="outer"):
-    jit = int(torch.randint(-1, 2, (1,), device=mask_hole.device).item())
-    ring = get_ring(mask_hole, max(size + jit, 0))[ring_type].to(fake.dtype).float()
-    ring = F.avg_pool2d(ring, kernel_size=7, stride=1, padding=3).clamp(0,1)
-
-    r = real
-    f = fake * ring + fake.detach() * (1.0 - ring)
-    return module(r, f) # * vgg_scale(ring)
 
 def lossTV(x, mask):
     """Return Total Variation (how much neighbours change).
@@ -260,11 +222,3 @@ def lossTV(x, mask):
         denom = (my.sum() + mx.sum()).clamp_min(1.0)
         return num / denom
     return dy.mean() + dx.mean()
-
-def vgg_scale(mask):
-    """Approximate per-pixel average for various mask holes."""
-    B, C, H, W = mask.size()
-    total = float(H * W)
-    active = mask.sum(dim=(1, 2, 3)).mean()
-    return torch.clamp(total / (active + EPS), max=2.0)
-
