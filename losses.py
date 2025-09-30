@@ -41,7 +41,7 @@ class VGG19StyleLoss(nn.Module):
     """
     def __init__(self, layers=None):
         super().__init__()
-        vgg = tvmodels.vgg19(weights=VGG19_Weights.IMAGENET1K_V1).features.eval()
+        vgg = tvmodels.vgg19(pretrained=True).features.eval()
         for param in vgg.parameters():
             param.requires_grad = False
         self.vgg = vgg
@@ -69,22 +69,28 @@ class VGG19StyleLoss(nn.Module):
         """
         real, fake: [B, 3, H, W] values in [-1, 1]
         """
-        real = (real + 1.0) / 2.0
+        real = (real + 1.0) / 2.0 # try using to_unit here!
         fake = (fake + 1.0) / 2.0
+        real = (real - self.mean) / self.std
+        fake = (fake - self.mean) / self.std
 
-        r = (real - self.mean) / self.std
-        f = (fake - self.mean) / self.std
-
-        loss = 0.0
+        real_features = []
+        fake_features = []
+        r = real
+        f = fake
         max_idx = max(self.layers)
         for idx, layer in enumerate(self.vgg):
-            with torch.no_grad():
-                r = layer(r)
-            f = layer(f)  # keep grads for fake layer
+            r = layer(r)
+            f = layer(f)
             if idx in self.layers:
-                loss = loss + self.criterion(self.gram(r), self.gram(f))
+                real_features.append(r)
+                fake_features.append(f)
             if idx >= max_idx:
                 break
+
+        loss = 0
+        for rf, ff in zip(real_features, fake_features):
+            loss += self.criterion(self.gram(rf), self.gram(ff))
         return loss
 
 class VGG16PerceptualLoss(nn.Module):
@@ -100,7 +106,7 @@ class VGG16PerceptualLoss(nn.Module):
     """
     def __init__(self, layers=None, resize=True):
         super().__init__()
-        vgg = tvmodels.vgg16(weights=VGG16_Weights.IMAGENET1K_FEATURES).features.eval()
+        vgg = tvmodels.vgg16(pretrained=True).features.eval()
         for param in vgg.parameters():
             param.requires_grad = False
         self.vgg = vgg
@@ -115,19 +121,26 @@ class VGG16PerceptualLoss(nn.Module):
         real = (real + 1.0) / 2.0
         fake = (fake + 1.0) / 2.0
 
-        r = (real - self.mean) / self.std
-        f = (fake - self.mean) / self.std
+        real = (real - self.mean) / self.std
+        fake = (fake - self.mean) / self.std
 
-        loss = 0.0
+        real_features = []
+        fake_features = []
+        r = real
+        f = fake
         max_idx = max(self.layers)
         for idx, layer in enumerate(self.vgg):
-            with torch.no_grad():
-                r = layer(r)
-            f = layer(f) # keep grads for fake layer
+            r = layer(r)
+            f = layer(f)
             if idx in self.layers:
-                loss = loss + self.criterion(r, f)
+                real_features.append(r)
+                fake_features.append(f)
             if idx >= max_idx:
                 break
+
+        loss = 0
+        for rf, ff in zip(real_features, fake_features):
+            loss += self.criterion(rf, ff)
         return loss
 
 def gradient_penalty(critic, real, fake, device):
@@ -207,18 +220,3 @@ def lossEdge(real, fake):
 def lossEdgeRing(real, fake, mask_hole, size=EDGE_RING, ring_type="both"):
     ring = get_ring(mask_hole, size)[ring_type].to(fake.dtype).float()
     return masked_l1(sobel(fake), sobel(real), ring)
-
-def lossTV(x, mask):
-    """Return Total Variation (how much neighbours change).
-    Calculate over the hole only, anisotropic so preserve edges."""
-    dy = (x[:, :, 1:, :] - x[:, :, :-1, :]).abs()
-    dx = (x[:, :, :, 1:] - x[:, :, :, :-1]).abs()
-    if mask is not None:
-        my = mask[:, :, 1:, :]
-        mx = mask[:, :, :, 1:]
-        dy = dy * my
-        dx = dx * mx
-        num = (dy.sum() + dx.sum())
-        denom = (my.sum() + mx.sum()).clamp_min(1.0)
-        return num / denom
-    return dy.mean() + dx.mean()
