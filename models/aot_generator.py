@@ -25,7 +25,7 @@ class AOTGenerator(nn.Module):
         self.aot1 = AOTBlock(G_HIDDEN * 4)
         #self.aot2 = AOTBlock(G_HIDDEN * 4)
         #self.art = ARTBlock(G_HIDDEN * 4)
-        self.ced = CEDBlock(G_HIDDEN * 4, detach_orientation=True)
+        self.dif = DIFBlock(G_HIDDEN * 4, detach_orientation=True)
         self.aot3 = AOTBlock(G_HIDDEN * 4)
         self.aot4 = AOTBlock(G_HIDDEN * 4)
 
@@ -44,7 +44,7 @@ class AOTGenerator(nn.Module):
         self.apply(weights_init_normal)
 
         for m in self.modules():
-            if isinstance(m, (ARTBlock, CEDBlock)):
+            if isinstance(m, (ARTBlock, DIFBlock)):
                 m.reset()
 
     def forward(self, x, mask):
@@ -58,7 +58,7 @@ class AOTGenerator(nn.Module):
         x = self.encoder(x)
         x = self.aot1(x)
         #x = self.aot2(x)
-        x = self.ced(x, mask)
+        x = self.dif(x, mask)
         x = self.aot3(x)
         x = self.aot4(x)
         x = self.decoder(x)
@@ -221,20 +221,17 @@ class ARTBlock(nn.Module):
         gated = gate * band
         return x * (1 - gated) + out * gated
 
-class CEDBlock(nn.Module):
-    def __init__(self, dim, steps=1, tau=0.15, alpha=1e-3, C=0.05,
-                 m=2, rho=2, detach_orientation=True):
+class DIFBlock(nn.Module):
+    def __init__(self, dim, steps=1, tau=0.2, alpha=0.8, beta=0.15,
+                 detach_orientation=False):
         super().__init__()
-        self.steps = steps # k, so total time: T = k * Δt
-        self.tau = tau # explicit time step: Δt, better <0.25
-        self.alpha = alpha # minimal across edge diffusivity
-        self.C = C # contrast parameter, more along-edge diff. if large
-        self.m = m # steepness of switch: 1 smoother 2 crisper
-        self.rho = rho # integration scale rho >= 2sigma
-        self.detach_orientation = detach_orientation # if True, dont backprop
+        self.steps = steps
+        self.tau = tau
+        self.alpha = alpha # gain for along-edge (tangent) curvature
+        self.beta = beta # gain for across-edge (normal) curvature
+        self.detach_orientation = detach_orientation
 
         # Gradients and blur for stable orientation
-        self.blur1 = AOTfilter(1, [[1, 2, 1], [2, 4, 2], [1, 2, 1]], norm=16.0)
         self.blur = AOTfilter(dim, [[1, 2, 1], [2, 4, 2], [1, 2, 1]], norm=16.0)
         self.gx = AOTfilter(dim, [[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]])
         self.gy = AOTfilter(dim, [[-1, -2, -1], [0, 0, 0], [1, 2, 1]])
@@ -255,7 +252,6 @@ class CEDBlock(nn.Module):
             conv.weight.copy_(w)
 
         _load(self.blur, [[1/16, 2/16, 1/16], [2/16, 4/16, 2/16], [1/16, 2/16, 1/16]])
-        _load(self.blur1, [[1 / 16, 2 / 16, 1 / 16], [2 / 16, 4 / 16, 2 / 16], [1 / 16, 2 / 16, 1 / 16]])
         _load(self.gx, [[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]])
         _load(self.gy, [[-1, -2, -1], [0, 0, 0], [-1, 0, 1]])
 
@@ -273,61 +269,42 @@ class CEDBlock(nn.Module):
 
     def forward(self, x, mask=None):
         B, C, H, W = x.shape
-        eps = 1e-6
-        band = self._down_mask(mask, H, W) if mask is not None else None
 
-        # 1) Structure tensor J = blur([gx;gy] [gx;gy]^T)
-        x_sigma = self.blur(x)
-        gx = self.gx(x_sigma) # [B, C, H, W]
-        gy = self.gy(x_sigma)
-        j11 = (gx * gx).sum(1, keepdim=True) # [B, 1, H, W]
-        j12 = (gx * gy).sum(1, keepdim=True)
-        j22 = (gy * gy).sum(1, keepdim=True)
+        with torch.no_grad():
+            gx = self.blur(self.gx(x))
+            gy = self.blur(self.gy(x))
+            mean_x = gx.mean(1, keepdim=True)
+            mean_y = gy.mean(1, keepdim=True)
 
-        # integrate over ρ (rho) using repeated gaussian passes
-        for _ in range(self.rho):
-            j11, j12, j22 = self.blur1(j11), self.blur1(j12), self.blur1(j22)
+            eps = 1e-6 if x.dtype == torch.float32 else 1e-4
+            magnitude = (mean_x**2 + mean_y**2).sqrt().clamp_min(eps)
 
-        s = (j11 + j22).clamp_min(eps)
-        j11, j12, j22 = j11 / s, j12 / s, j22 / s
-        # due to high number of channels scaled
+            # gradient direction (vx, vy) -> normal to edge
+            # (-vy, vx) -> tangent to edge
+            vx, vy = mean_x / magnitude, mean_y / magnitude
+            if self.detach_orientation:
+                vx = vx.detach()
+                vy = vy.detach()
 
-        # 2) Eigenvalues μ1>=μ2 and major eigenvector angle θ
-        tmp = torch.sqrt(((j11 - j22) ** 2 + 4.0 * j12 ** 2).clamp_min(eps))
-        mu1 = 0.5 * (j11 + j22 + tmp) # largest mu
-        mu2 = 0.5 * (j11 + j22 - tmp)
+            c_par = torch.sigmoid(4.0 * magnitude).expand(B, C, H, W) # ~1 at strong edges
+            c_perp = 0.25 * (1.0 - c_par)
+            band = self._down_mask(mask, H, W) if mask is not None else None
 
-        # Coherence measure (un-normalized) and Weickert's λ
-        delta = (mu1 - mu2) # Δ = μ1 - μ2
-        lambda_perp = self.alpha # λ⟂ = α (across coherent structures)
-        lambda_tang = self.alpha + (1.0 - self.alpha) * torch.exp(
-            -self.C / (delta.pow(2 * self.m) + eps)
-        ) # λ∥ = α + (1 - α)exp(-C/(μ1 - μ2)^2) (along coherent structures)
+        for _ in range(self.steps):
+            dxx = self.dxx(x)
+            dyy = self.dyy(x)
+            dxy = self.dxy(x)
 
-        # Major eigenvector (normal to edges), tangent is its perpendicular
-        theta = 0.5 * torch.atan2(2.0 * j12, (j22 - j11 + eps))
-        vx, vy = torch.cos(theta), torch.sin(theta)
-        if self.detach_orientation:
-            vx = vx.detach()
-            vy = vy.detach()
-            #lambda_tang = lambda_tang.detach()
+            vxvx = vx * vx
+            vyvy = vy * vy
+            vxvy = vx * vy
 
-        # 3) Explicit Euler
-        x_new = x
-        for _ in range(max(self.steps, 1)):
-            # directional derivatives
-            dxx = self.dxx(x_new)
-            dyy = self.dyy(x_new)
-            dxy = self.dxy(x_new)
-
-            # second derivatives along normal (v) and tangent (v⟂)
-            # v = (cosθ, sinθ)
-            # Along edge (tangent) is v⟂, across edge (normal) is v
-            d2n = (vx * vx) * dxx + 2.0 * (vx * vy) * dxy + (vy * vy) * dyy # v^T H v (across edge)
-            d2t = (vy * vy) * dxx - 2.0 * (vx * vy) * dxy + (vx * vx) * dyy # v⟂^T H v⟂ (along edge)
-            step = self.tau * (lambda_tang * d2t + lambda_perp * d2n)
-
+            d2n = vxvx * dxx + 2 * vxvy * dxy + vyvy * dyy # curvature along normal
+            d2t = vyvy * dxx - 2 * vxvy * dxy + vxvx * dyy # curvature along tangent
+            step = self.tau * (
+                    self.alpha * c_par * d2t + self.beta * c_perp * d2n
+            )
             if band is not None:
                 step = step * band
-            x_new = x_new + step
-        return x_new
+            x = x + step
+        return x
