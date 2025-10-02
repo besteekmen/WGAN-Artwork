@@ -4,7 +4,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torchvision.models as tvmodels
-from torchvision.models import VGG19_Weights, VGG16_Weights
 
 from config import SCALES, HOLE_LAMBDA, VALID_LAMBDA, EPS, EDGE_RING
 from utils.utils import get_device
@@ -12,7 +11,6 @@ from torchmetrics.image.ssim import StructuralSimilarityIndexMeasure
 from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
 from torchmetrics.image.fid import FrechetInceptionDistance
 from utils.vision_utils import downsample, get_ring
-
 
 def init_losses(device=get_device()):
     """Initialize the losses for model networks."""

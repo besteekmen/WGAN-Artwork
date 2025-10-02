@@ -3,6 +3,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from models.weights_init import weights_init_normal
 from config import *
+from utils.vision_utils import get_ring
+
 
 class AOTGenerator(nn.Module):
     def __init__(self, in_channels=4):
@@ -261,18 +263,19 @@ class DIFBlock(nn.Module):
 
     def _down_mask(self, mask, H, W):
         """Downscale mask to feature dimensions."""
-        kH, kW = max(mask.size(2) // H, 1), max(mask.size(3) // W, 1)
-        down_mask = F.avg_pool2d(mask.float(), (kH, kW), (kH, kW))
-        down_mask = (down_mask > 0.5).float()[:, :, :H, :W]
-        down_mask = 1.0 - F.avg_pool2d(1.0 - down_mask, 3, 1, 1)
-        return down_mask.clamp_(0, 1)
+        return F.interpolate(mask.float(), size=(H, W), mode='nearest').clamp_(0, 1)
 
     def forward(self, x, mask=None):
         B, C, H, W = x.shape
+        band = self._down_mask(mask, H, W) if mask is not None else None
+        if band is None:
+            band = torch.zeros(B, 1, H, W, device=x.device, dtype=x.dtype)
+        inner = get_ring(band, size=1)["inner"]
 
         with torch.no_grad():
-            gx = self.blur(self.gx(x))
-            gy = self.blur(self.gy(x))
+            ctx = x * (1.0 - band)
+            gx = self.blur(self.gx(ctx))
+            gy = self.blur(self.gy(ctx))
             mean_x = gx.mean(1, keepdim=True)
             mean_y = gy.mean(1, keepdim=True)
 
@@ -286,14 +289,14 @@ class DIFBlock(nn.Module):
                 vx = vx.detach()
                 vy = vy.detach()
 
-            c_par = torch.sigmoid(4.0 * magnitude).expand(B, C, H, W) # ~1 at strong edges
+            c_par = torch.sigmoid(4.0 * magnitude) # ~1 at strong edges
             c_perp = 0.25 * (1.0 - c_par)
-            band = self._down_mask(mask, H, W) if mask is not None else None
 
+        x_new = x
         for _ in range(self.steps):
-            dxx = self.dxx(x)
-            dyy = self.dyy(x)
-            dxy = self.dxy(x)
+            dxx = self.dxx(x_new)
+            dyy = self.dyy(x_new)
+            dxy = self.dxy(x_new)
 
             vxvx = vx * vx
             vyvy = vy * vy
@@ -304,7 +307,6 @@ class DIFBlock(nn.Module):
             step = self.tau * (
                     self.alpha * c_par * d2t + self.beta * c_perp * d2n
             )
-            if band is not None:
-                step = step * band
-            x = x + step
-        return x
+            step = step * inner
+            x_new = x_new + step
+        return x_new
