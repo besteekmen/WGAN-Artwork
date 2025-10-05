@@ -117,6 +117,7 @@ def main():
         perc_lambda = get_schedule(epoch, PERCEPTUAL_LAMBDA_SCHEDULE)
         style_lambda = get_schedule(epoch, STYLE_LAMBDA_SCHEDULE)
         edge_lambda = get_schedule(epoch, EDGE_LAMBDA_SCHEDULE)
+        lab_lambda = get_schedule(epoch, LAB_LAMBDA_SCHEDULE)
         irr_ratio = get_schedule(epoch, IRR_RATIO_SCHEDULE)
         dif_scale = get_schedule(epoch, DIF_SCALE_SCHEDULE)
 
@@ -263,7 +264,7 @@ def main():
                                 style_lambda * losses["style"] +
                                 perc_lambda * losses["perceptual"] +
                                 TV_LAMBDA * losses["tv"] +
-                                LAB_LAMBDA * losses["lab"])
+                                lab_lambda * losses["lab"])
 
             g_tot += losses["totalG"].detach()
             d_tot += losses["totalD"].detach()
@@ -280,7 +281,7 @@ def main():
                     "style_w": style_lambda * raw["style"],
                     "perceptual_w": perc_lambda * raw["perceptual"],
                     "tv_w": TV_LAMBDA * raw["tv"],
-                    "lab_w": LAB_LAMBDA * raw["lab"]
+                    "lab_w": lab_lambda * raw["lab"]
                 }
                 logger.info(f"[Debug] Raw: {raw} | Weighted: {weighted}")
 
@@ -429,7 +430,7 @@ def main():
             style_lambda * avg_style +
             perc_lambda * avg_perc +
             TV_LAMBDA * avg_tv +
-            LAB_LAMBDA * avg_lab
+            lab_lambda * avg_lab
         )
 
         avg_val_ssim = ssim_tot / val_batches

@@ -31,14 +31,18 @@ class AOTGenerator(nn.Module):
         self.aot3 = AOTBlock(G_HIDDEN * 4)
         self.aot4 = AOTBlock(G_HIDDEN * 4)
 
+        #self.deconv1 = nn.ConvTranspose2d(G_HIDDEN * 4, G_HIDDEN * 2, 4, stride=2, padding=1, bias=True)
+        #self.deconv2 = nn.ConvTranspose2d(G_HIDDEN * 2, G_HIDDEN, 4, stride=2, padding=1, bias=True)
+        #self.blur_up1 = AOTfilter(G_HIDDEN * 2, [[1,2,1],[2,4,2],[1,2,1]], norm=16.0)
+        #self.blur_up2 = AOTfilter(G_HIDDEN, [[1,2,1],[2,4,2],[1,2,1]], norm=16.0)
+        #self.to_rgb = nn.Conv2d(G_HIDDEN, 3, 3, padding=1)
+
         self.decoder = nn.Sequential(
             # 7th layer
             nn.ConvTranspose2d(G_HIDDEN * 4, G_HIDDEN * 2, 4, stride=2, padding=1, bias=True),
-            #nn.Conv2d(G_HIDDEN * 2, G_HIDDEN * 2, 3, padding=1),
             nn.ReLU(inplace=True),
             # 8th layer
             nn.ConvTranspose2d(G_HIDDEN * 2, G_HIDDEN, 4, stride=2, padding=1, bias=True),
-            #nn.Conv2d(G_HIDDEN, G_HIDDEN, 3, padding=1),
             nn.ReLU(inplace=True),
             # 9th layer (to RGB)
             nn.Conv2d(G_HIDDEN, 3, 3, padding=1)
@@ -63,6 +67,15 @@ class AOTGenerator(nn.Module):
         x = self.dif(x, mask)
         x = self.aot3(x)
         x = self.aot4(x)
+
+        #x = self.deconv1(x)
+        #x = self.blur_up1(x)
+        #x = F.relu(x, inplace=True)
+        #x = self.deconv2(x)
+        #x = self.blur_up2(x)
+        #x = F.relu(x, inplace=True)
+        #x = self.to_rgb(x)
+
         x = self.decoder(x)
         return torch.tanh(x)
 
@@ -136,7 +149,7 @@ def AOTfilter(channel, kernel, norm=None):
     return nn.Sequential(pad, conv)
 
 class DIFBlock(nn.Module):
-    def __init__(self, dim, steps=1, tau=0.2, alpha=0.9, beta=0.10,
+    def __init__(self, dim, steps=1, tau=0.15, alpha=0.9, beta=0.10,
                  detach_orientation=False):
         super().__init__()
         self.steps = steps
@@ -186,19 +199,22 @@ class DIFBlock(nn.Module):
 
     def forward(self, x, mask=None):
         B, C, H, W = x.shape
-        band = self._down_mask(mask, H, W) if mask is not None else None
-        if band is None:
-            band = torch.zeros(B, 1, H, W, device=x.device, dtype=x.dtype)
-        inner = get_ring(band, size=self.ring, blur_kernel=9, normalize=True)["inner"].to(band.dtype)
+        eps = 1e-6 if x.dtype == torch.float32 else 1e-4
+
+        band = self._down_mask(mask, H, W) if mask is not None else torch.zeros(B,1,H,W, device=x.device, dtype=x.dtype)
+        inner = get_ring(band, size=self.ring, blur_kernel=7, normalize=False)["inner"]
+        gate = (inner * inner).clamp_(0,1)
 
         with torch.no_grad():
-            ctx = x * (1.0 - band)
-            gx = self.blur(self.gx(ctx))
-            gy = self.blur(self.gy(ctx))
+            gx = self.blur(self.gx(x))
+            gy = self.blur(self.gy(x))
+            soft_band = F.avg_pool2d(band, kernel_size=3, stride=1, padding=1)
+            orient_w = (1.0 - 0.6 * soft_band).clamp(0.4,1.0)
+            gx = gx * orient_w
+            gy = gy * orient_w
+
             mean_x = gx.mean(1, keepdim=True)
             mean_y = gy.mean(1, keepdim=True)
-
-            eps = 1e-6 if x.dtype == torch.float32 else 1e-4
             magnitude = (mean_x**2 + mean_y**2).sqrt().clamp_min(eps)
 
             # gradient direction (vx, vy) -> normal to edge
@@ -221,8 +237,8 @@ class DIFBlock(nn.Module):
 
             # local CFL safety scaling for explicit step
             q = (self.alpha0 * c_par).abs() + (self.beta0 * c_perp).abs()
-            safety = 0.33 # 1/3 for a 3x3 stencil
-            tau_eff = (self.tau0 * self.scale) * torch.clamp(safety / (q + eps), max=1.0)
+            # 1/3 so apprx 0.33 for a 3x3 stencil
+            tau_eff = (self.tau0 * self.scale) * torch.clamp(0.33 / (q + eps), max=1.0)
 
         x_new = x
         for _ in range(self.steps):
@@ -237,6 +253,7 @@ class DIFBlock(nn.Module):
             d2n = vxvx * dxx + 2 * vxvy * dxy + vyvy * dyy # curvature along normal
             d2t = vyvy * dxx - 2 * vxvy * dxy + vxvx * dyy # curvature along tangent
             core = self.alpha0 * c_par * d2t + self.beta0 * c_perp * d2n
-            step = (tau_eff * core * inner).clamp(-0.05, 0.05)
+            step = (tau_eff * core) * gate
+            step = step.clamp(-0.03, 0.03)
             x_new = x_new + step
         return x_new

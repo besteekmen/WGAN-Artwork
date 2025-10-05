@@ -216,31 +216,27 @@ def sobel(x):
 def lossEdge(real, fake):
     return F.l1_loss(sobel(real), sobel(fake)) # use functional l1, not class one
 
-def lossEdgeRing(real, fake, mask_hole, size=EDGE_RING, ring_type="both"):
-    ring = get_ring(mask_hole, size)[ring_type].to(fake.dtype).float()
-    return masked_l1(sobel(fake), sobel(real), ring)
-
 def lossTV(x, mask, size=TV_RING):
     """Return Total Variation (how much neighbours change).
     Calculate over the ring only, anisotropic so preserve edges."""
-    ring = get_ring(mask, size, blur_kernel=7, normalize=True)["both"].to(mask.dtype)
+    ring = get_ring(mask, size, blur_kernel=5, normalize=False)["both"].to(mask.dtype)
 
     # finite differences
     dx = (x[:, :, :, 1:] - x[:, :, :, :-1]).abs()
     dy = (x[:, :, 1:, :] - x[:, :, :-1, :]).abs()
 
     # crop to match shape
-    ring_x = ring[:, :, :, 1:] * ring[:, :, :, :-1]
-    ring_y = ring[:, :, 1:, :] * ring[:, :, :-1, :]
+    ringx = (ring[:, :, :, 1:] * ring[:, :, :, :-1]).to(x.dtype)
+    ringy = (ring[:, :, 1:, :] * ring[:, :, :-1, :]).to(x.dtype)
 
-    tvx = (dx.abs() * ring_x).sum()
-    tvy = (dy.abs() * ring_y).sum()
-    denom = (ring_x.sum() + ring_y.sum()).clamp_min(1.0)
+    tvx = (dx.abs() * ringx).sum()
+    tvy = (dy.abs() * ringy).sum()
+    denom = (ringx.sum() + ringy.sum()).clamp_min(1.0)
     return (tvx + tvy) / denom
 
 def lossLab(real, fake, mask, size=LAB_RING):
     """L1 on Lab(a,b) channels."""
-    ring = get_ring(mask, size, blur_kernel=7, normalize=True)["inner"].to(mask.dtype)
+    ring = get_ring(mask, size, blur_kernel=7, normalize=True)["both"].to(mask.dtype)
 
     # sRGB [-1, 1] -> RGB [0, 1] -> Lab (D65) on GPU
     r_lab = Kcolor.rgb_to_lab(to_unit(real))
