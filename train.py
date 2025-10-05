@@ -17,11 +17,6 @@ from utils.utils import to_unit, set_seed, get_device, print_device, make_run_di
     full_precision, get_schedule, set_logger, is_cuda, clamp_f32, to_u8, freeze_rng, restore_rng
 from dataset import prepare_dataset, prepare_batch
 from utils.vision_utils import crop_local_patch, plot_loss, set_fixed, save_images, sample_offset
-import cv2, os
-
-cv2.setNumThreads(0)
-os.environ["OPENCV_OPENCL_RUNTIME"] = "disabled"
-torch.set_num_threads(1)
 
 # ------------------------------------------------------------------------------
 # Training function

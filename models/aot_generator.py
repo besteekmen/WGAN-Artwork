@@ -154,9 +154,9 @@ class DIFBlock(nn.Module):
         super().__init__()
         self.steps = steps
         # base parameters
-        self.tau0 = float(tau)
-        self.alpha0 = float(alpha)  # gain for along-edge (tangent) curvature
-        self.beta0 = float(beta)  # gain for across-edge (normal) curvature
+        self.tau = tau
+        self.alpha = alpha  # gain for along-edge (tangent) curvature
+        self.beta = beta  # gain for across-edge (normal) curvature
         self.scale = 1.0
         self.ring = 1
         self.detach_orientation = detach_orientation
@@ -199,22 +199,16 @@ class DIFBlock(nn.Module):
 
     def forward(self, x, mask=None):
         B, C, H, W = x.shape
-        eps = 1e-6 if x.dtype == torch.float32 else 1e-4
-
         band = self._down_mask(mask, H, W) if mask is not None else torch.zeros(B,1,H,W, device=x.device, dtype=x.dtype)
-        inner = get_ring(band, size=self.ring, blur_kernel=7, normalize=False)["inner"]
-        gate = (inner * inner).clamp_(0,1)
+        inner = get_ring(band, size=self.ring)["inner"]
 
         with torch.no_grad():
             gx = self.blur(self.gx(x))
             gy = self.blur(self.gy(x))
-            soft_band = F.avg_pool2d(band, kernel_size=3, stride=1, padding=1)
-            orient_w = (1.0 - 0.6 * soft_band).clamp(0.4,1.0)
-            gx = gx * orient_w
-            gy = gy * orient_w
-
             mean_x = gx.mean(1, keepdim=True)
             mean_y = gy.mean(1, keepdim=True)
+
+            eps = 1e-6 if x.dtype == torch.float32 else 1e-4
             magnitude = (mean_x**2 + mean_y**2).sqrt().clamp_min(eps)
 
             # gradient direction (vx, vy) -> normal to edge
@@ -236,9 +230,9 @@ class DIFBlock(nn.Module):
             c_perp = 0.25 * (1.0 - c_par)
 
             # local CFL safety scaling for explicit step
-            q = (self.alpha0 * c_par).abs() + (self.beta0 * c_perp).abs()
+            q = (self.alpha * c_par).abs() + (self.beta * c_perp).abs()
             # 1/3 so apprx 0.33 for a 3x3 stencil
-            tau_eff = (self.tau0 * self.scale) * torch.clamp(0.33 / (q + eps), max=1.0)
+            tau_eff = (self.tau * self.scale) * torch.clamp(0.33 / (q + eps), max=1.0)
 
         x_new = x
         for _ in range(self.steps):
@@ -252,8 +246,9 @@ class DIFBlock(nn.Module):
 
             d2n = vxvx * dxx + 2 * vxvy * dxy + vyvy * dyy # curvature along normal
             d2t = vyvy * dxx - 2 * vxvy * dxy + vxvx * dyy # curvature along tangent
-            core = self.alpha0 * c_par * d2t + self.beta0 * c_perp * d2n
-            step = (tau_eff * core) * gate
-            step = step.clamp(-0.03, 0.03)
+            step = tau_eff * (
+                self.alpha * c_par * d2t + self.beta * c_perp * d2n
+            )
+            step = step * inner
             x_new = x_new + step
         return x_new

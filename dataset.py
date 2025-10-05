@@ -14,12 +14,6 @@ from utils.utils import is_cuda, clear_folder
 from config import DATA_PATH, BATCH_SIZE, NUM_WORKERS, CROP_SIZE, SEED, EPS
 import cv2
 
-cv2.setNumThreads(0)
-try:
-    cv2.ocl.setUseOpenCL(False)
-except Exception:
-    pass
-
 class CroppedImageDataset(Dataset):
     """Dataset of previously cropped images.
 
@@ -169,9 +163,8 @@ def make_dataloader(dataset, set_path, batch_size, num_workers, cuda, shuffle=Tr
             shuffle=shuffle,
             num_workers=num_workers,
             pin_memory=cuda,
-            persistent_workers=False,
-            prefetch_factor=2,
-            timeout=60
+            persistent_workers=True,
+            prefetch_factor=2
         )
         _ = next(iter(dataloader))  # force load to test
     except Exception as e:
@@ -180,8 +173,7 @@ def make_dataloader(dataset, set_path, batch_size, num_workers, cuda, shuffle=Tr
             dataset,
             batch_size=batch_size,
             shuffle=shuffle,
-            num_workers=0,
-            timeout=60
+            num_workers=0
         )
     # Add a pin_memory=True argument when calling torch.utils.data.DataLoader()
     # on small datasets, to make sure data is stored at fixed GPU memory addresses
