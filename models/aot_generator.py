@@ -155,10 +155,9 @@ class DIFBlock(nn.Module):
         self.steps = steps
         # base parameters
         self.tau = tau
-        self.alpha = alpha  # gain for along-edge (tangent) curvature
-        self.beta = beta  # gain for across-edge (normal) curvature
+        self.alpha = alpha # gain for along-edge (tangent) curvature
+        self.beta = beta # gain for across-edge (normal) curvature
         self.scale = 1.0
-        self.ring = 1
         self.detach_orientation = detach_orientation
 
         # Gradients and blur for stable orientation
@@ -200,9 +199,10 @@ class DIFBlock(nn.Module):
     def forward(self, x, mask=None):
         B, C, H, W = x.shape
         band = self._down_mask(mask, H, W) if mask is not None else torch.zeros(B,1,H,W, device=x.device, dtype=x.dtype)
-        inner = get_ring(band, size=self.ring)["inner"]
+        inner = get_ring(band, size=1)["inner"]
 
         with torch.no_grad():
+            # ctx = x * (1.0 - band) (try later for ctx direction only)
             gx = self.blur(self.gx(x))
             gy = self.blur(self.gy(x))
             mean_x = gx.mean(1, keepdim=True)
