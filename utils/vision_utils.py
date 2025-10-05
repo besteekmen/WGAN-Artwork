@@ -8,7 +8,7 @@ import PIL.Image as PILImage
 from matplotlib import pyplot as plt
 from torchvision import transforms
 
-from config import LOCAL_PATCH_SIZE, SCALES, BATCH_SIZE, JITTER, SEED
+from config import LOCAL_PATCH_SIZE, SCALES, BATCH_SIZE, JITTER, SEED, EPS
 from dataset import generate_square_mask
 
 
@@ -28,7 +28,7 @@ def dilation(x, size=3):
 def erosion(x, size=3):
     return 1.0 - F.max_pool2d(1.0 - x, kernel_size=(2 * size + 1), stride=1, padding=size)
 
-def get_ring(x, size=3):
+def get_ring(x, size=3, blur_kernel=0, normalize=False):
     dil = dilation(x, size)
     er = erosion(x, size)
     ring = {
@@ -36,6 +36,17 @@ def get_ring(x, size=3):
         "outer": torch.clamp(dil - x, 0.0, 1.0),
         "both": torch.clamp(dil - er, 0.0, 1.0)
     }
+
+    if blur_kernel and blur_kernel > 1:
+        padding = blur_kernel // 2
+        for k in ring.keys():
+            r = ring[k]
+            r = F.avg_pool2d(r, kernel_size=blur_kernel, stride=1, padding=padding)
+            if normalize:
+                rmin = r.amin(dim=(2,3), keepdim=True)
+                rmax = r.amax(dim=(2,3), keepdim=True)
+                r = (r - rmin) / (rmax - rmin + EPS)
+            ring[k] = r.clamp_(0,1)
     return ring
 
 def crop_local_patch(images: torch.Tensor, masks_hole: torch.Tensor,

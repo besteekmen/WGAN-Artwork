@@ -10,13 +10,18 @@ from time import perf_counter
 
 # Project specific modules
 from config import *
-from losses import gradient_penalty, init_losses, lossMSL1, init_metrics, lossEdge
+from losses import gradient_penalty, init_losses, lossMSL1, init_metrics, lossEdge, lossTV, lossLab
 from models.model_builder import init_optimizers, init_nets, save_checkpoint, setup_model, forward_pass, init_ema, \
     save_ema
 from utils.utils import to_unit, set_seed, get_device, print_device, make_run_directory, half_precision, \
     full_precision, get_schedule, set_logger, is_cuda, clamp_f32, to_u8, freeze_rng, restore_rng
 from dataset import prepare_dataset, prepare_batch
 from utils.vision_utils import crop_local_patch, plot_loss, set_fixed, save_images, sample_offset
+import cv2, os
+
+cv2.setNumThreads(0)
+os.environ["OPENCV_OPENCL_RUNTIME"] = "disabled"
+torch.set_num_threads(1)
 
 # ------------------------------------------------------------------------------
 # Training function
@@ -113,6 +118,10 @@ def main():
         style_lambda = get_schedule(epoch, STYLE_LAMBDA_SCHEDULE)
         edge_lambda = get_schedule(epoch, EDGE_LAMBDA_SCHEDULE)
         irr_ratio = get_schedule(epoch, IRR_RATIO_SCHEDULE)
+        dif_scale = get_schedule(epoch, DIF_SCALE_SCHEDULE)
+
+        if hasattr(netG, 'dif') and hasattr(netG, 'set_schedule'):
+            netG.dif.set_schedule(dif_scale)
 
         # Set training mode
         netG.train(); globalD.train(); localD.train()
@@ -218,11 +227,15 @@ def main():
                 orig_full = clamp_f32(image)
                 sl = lossStyle(orig_full, comp_full)
                 pl = lossPerceptual(orig_full, comp_full)
+                tv = lossTV(comp_full, mask_hole)
+                lab = lossLab(orig_full, comp_full, mask_hole)
             losses["style"] = sl
             losses["perceptual"] = pl
+            losses["tv"] = tv
+            losses["lab"] = lab
 
             # DEBUG only: Check for loss values to find the cause of NaN
-            all_terms = [losses["adv"], losses["l1"], losses["edge"], sl, pl]
+            all_terms = [losses["adv"], losses["l1"], losses["edge"], sl, pl, tv, lab]
             with_nan = (not torch.isfinite(fake).all()) or (not all(torch.isfinite(x) for x in all_terms))
 
             if with_nan:
@@ -232,7 +245,9 @@ def main():
                                     f"l1={float(losses['l1']) if torch.isfinite(losses['l1']) else 'NaN'} "
                                     f"edge={float(losses['edge']) if torch.isfinite(losses['edge']) else 'NaN'} "
                                     f"style={float(losses['style']) if torch.isfinite(losses['style']) else 'NaN'} "
-                                    f"perceptual={float(losses['perceptual']) if torch.isfinite(losses['perceptual']) else 'NaN'}")
+                                    f"perceptual={float(losses['perceptual']) if torch.isfinite(losses['perceptual']) else 'NaN'} "
+                                    f"tv={float(losses['tv']) if torch.isfinite(losses['tv']) else 'NaN'} "
+                                    f"lab={float(losses['lab']) if torch.isfinite(losses['lab']) else 'NaN'}")
                     train_tqdm.write(message_skip)
                     logger.info(message_skip)
                     nan_log_i = i
@@ -246,7 +261,9 @@ def main():
                                 L1_LAMBDA * losses["l1"] +
                                 edge_lambda * losses["edge"] +
                                 style_lambda * losses["style"] +
-                                perc_lambda * losses["perceptual"])
+                                perc_lambda * losses["perceptual"] +
+                                TV_LAMBDA * losses["tv"] +
+                                LAB_LAMBDA * losses["lab"])
 
             g_tot += losses["totalG"].detach()
             d_tot += losses["totalD"].detach()
@@ -255,13 +272,15 @@ def main():
             num_batches += 1
 
             if i % SAVE_FREQ == 0:
-                raw = {k: float(losses[k]) for k in ["adv", "l1", "edge", "style", "perceptual"]}
+                raw = {k: float(losses[k]) for k in ["adv", "l1", "edge", "style", "perceptual", "tv", "lab"]}
                 weighted = {
                     "adv_w": adv_lambda * raw["adv"],
                     "l1_w": L1_LAMBDA * raw["l1"],
                     "edge_w": edge_lambda * raw["edge"],
                     "style_w": style_lambda * raw["style"],
-                    "perceptual_w": perc_lambda * raw["perceptual"]
+                    "perceptual_w": perc_lambda * raw["perceptual"],
+                    "tv_w": TV_LAMBDA * raw["tv"],
+                    "lab_w": LAB_LAMBDA * raw["lab"]
                 }
                 logger.info(f"[Debug] Raw: {raw} | Weighted: {weighted}")
 
@@ -346,7 +365,7 @@ def main():
 
         with torch.no_grad():
             ssim_tot, lpips_tot = 0.0, 0.0
-            l1_tot, edge_tot, style_tot, perc_tot = 0.0, 0.0, 0.0, 0.0
+            l1_tot, edge_tot, style_tot, perc_tot, tv_tot, lab_tot = 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
             val_batches = 0
 
             for image, mask in val_loader:
@@ -377,12 +396,16 @@ def main():
                     orig_full = clamp_f32(image)
                     vsl = lossStyle(orig_full, comp_full)
                     vpl = lossPerceptual(orig_full, comp_full)
+                    vtv = lossTV(comp_full, mask_hole)
+                    vlab = lossLab(orig_full, comp_full, mask_hole)
 
                 # Loss totals for averaging
                 l1_tot += l1_loss.item()
                 edge_tot += edge_loss.item()
                 style_tot += vsl.item()
                 perc_tot += vpl.item()
+                tv_tot += vtv.item()
+                lab_tot += vlab.item()
 
         # Continue with saved random state
         restore_rng(r, n, t, c)
@@ -397,12 +420,16 @@ def main():
         avg_edge = edge_tot / val_batches
         avg_style = style_tot / val_batches
         avg_perc = perc_tot / val_batches
+        avg_tv = tv_tot / val_batches
+        avg_lab = lab_tot / val_batches
 
         val_g = (
             L1_LAMBDA * avg_l1 +
             edge_lambda * avg_edge +
             style_lambda * avg_style +
-            perc_lambda * avg_perc
+            perc_lambda * avg_perc +
+            TV_LAMBDA * avg_tv +
+            LAB_LAMBDA * avg_lab
         )
 
         avg_val_ssim = ssim_tot / val_batches
@@ -415,7 +442,9 @@ def main():
             f"L1={avg_l1:.4f}, "
             f"Edge={avg_edge:.4f}, "
             f"Style={avg_style:.4f}, "
-            f"Perc={avg_perc:.4f} | "
+            f"Perc={avg_perc:.4f}, "
+            f"TV={avg_tv:.4f}, "
+            f"Lab={avg_lab:.4f} | "
             f"SSIM={avg_val_ssim:.4f}, "
             f"LPIPS={avg_val_lpips:.4f}"
         )

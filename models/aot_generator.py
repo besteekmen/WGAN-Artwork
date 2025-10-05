@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
 from models.weights_init import weights_init_normal
 from config import *
 from utils.vision_utils import get_ring
@@ -26,7 +27,6 @@ class AOTGenerator(nn.Module):
 
         self.aot1 = AOTBlock(G_HIDDEN * 4)
         #self.aot2 = AOTBlock(G_HIDDEN * 4)
-        #self.art = ARTBlock(G_HIDDEN * 4)
         self.dif = DIFBlock(G_HIDDEN * 4, detach_orientation=True)
         self.aot3 = AOTBlock(G_HIDDEN * 4)
         self.aot4 = AOTBlock(G_HIDDEN * 4)
@@ -46,7 +46,7 @@ class AOTGenerator(nn.Module):
         self.apply(weights_init_normal)
 
         for m in self.modules():
-            if isinstance(m, (ARTBlock, DIFBlock)):
+            if isinstance(m, (DIFBlock)):
                 m.reset()
 
     def forward(self, x, mask):
@@ -135,102 +135,17 @@ def AOTfilter(channel, kernel, norm=None):
         p.requires_grad = False
     return nn.Sequential(pad, conv)
 
-class ARTBlock(nn.Module):
-    def __init__(self, dim):
-        super(ARTBlock, self).__init__()
-
-        # fixed filters
-        self.blur = AOTfilter(dim, [[1, 2, 1], [2, 4, 2], [1, 2, 1]], norm=16.0)
-        self.sobelx = AOTfilter(dim, [[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]])
-        self.sobely = AOTfilter(dim, [[-1, -2, -1], [0, 0, 0], [1, 2, 1]])
-
-        # task specific branches
-        self.edge = nn.Sequential(
-            nn.Conv2d(dim, dim // 4, 1),
-            nn.ReLU(inplace=True)
-        )
-        self.low = nn.Sequential(
-            nn.Conv2d(dim, dim // 4, 1),
-            nn.ReLU(inplace=True)
-        )
-        self.mid = nn.Sequential(
-            nn.ReflectionPad2d(2),
-            nn.Conv2d(dim, dim // 4, 3, padding=0, dilation=2),
-            nn.ReLU(inplace=True)
-        )
-        self.high = nn.Sequential(
-            nn.Conv2d(dim, dim // 4, 1),
-            nn.ReLU(inplace=True)
-        )
-
-        self.fuse = nn.Sequential(nn.ReflectionPad2d(1), nn.Conv2d(dim, dim, 3, padding=0, dilation=1))
-        self.gate = nn.Sequential(nn.ReflectionPad2d(1), nn.Conv2d(dim, dim, 3, padding=0, dilation=1))
-
-        # learnable branch weights
-        self.alpha = nn.Parameter(torch.zeros(1, 4, 1, 1))
-
-    @torch.no_grad()
-    def reset(self):
-        blur_conv = self.blur[1]
-        sobelx_conv = self.sobelx[1]
-        sobely_conv = self.sobely[1]
-
-        device = blur_conv.weight.device
-        dtype = blur_conv.weight.dtype
-        in_channels = blur_conv.in_channels
-
-        blur = torch.tensor([[1, 2, 1], [2, 4, 2], [1, 2, 1]], dtype=dtype, device=device) / 16.0
-        sobelx = torch.tensor([[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]], dtype=dtype, device=device)
-        sobely = torch.tensor([[-1, -2, -1], [0, 0, 0], [1, 2, 1]], dtype=dtype, device=device)
-
-        blur_conv.weight.copy_(blur.view(1, 1, 3, 3).expand(in_channels, 1, 3, 3))
-        sobelx_conv.weight.copy_(sobelx.view(1, 1, 3, 3).expand(in_channels, 1, 3, 3))
-        sobely_conv.weight.copy_(sobely.view(1, 1, 3, 3).expand(in_channels, 1, 3, 3))
-
-    def _feat_mask(self, mask, dims):
-        """Downscale mask to feature dimensions."""
-        B, C, H, W = mask.shape
-        fH, fW = dims
-        kH, kW = max(H // fH, 1), max(W // fW, 1)
-        feat_mask = F.avg_pool2d(mask.float(), (kH, kW), (kH, kW))
-        feat_mask = (feat_mask > 0.5).float()[:, :, :fH, :fW]
-        feat_mask = F.avg_pool2d(feat_mask, 3, 1, 1).clamp_(0, 1)
-        return feat_mask
-
-    def forward(self, x, mask=None):
-        if mask is not None:
-            band = self._feat_mask(mask, x.shape[-2:])
-        else:
-            band = torch.ones(x.size(0), 1, x.size(2), x.size(3), device=x.device, dtype=x.dtype)
-
-        blur = self.blur(x)
-        low = self.low(blur) # palette / smooth colour
-        high = self.high(x - blur) # texture / brush
-
-        gx = self.sobelx(x)
-        gy = self.sobely(x)
-        edge = self.edge(torch.abs(gx) + torch.abs(gy))
-        mid = self.mid(x)  # mid structure
-
-        scale = 1.0 + 0.25 * torch.tanh(self.alpha) # range [0.75, 1.25]
-        edge = edge * scale[:,0:1]
-        low = low * scale[:,1:2]
-        mid = mid * scale[:,2:3]
-        high = high * scale[:,3:4]
-
-        out = self.fuse(torch.cat([edge, low, mid, high], dim=1))
-        gate = torch.sigmoid(aot_layer_norm(self.gate(x)))
-        gated = gate * band
-        return x * (1 - gated) + out * gated
-
 class DIFBlock(nn.Module):
-    def __init__(self, dim, steps=1, tau=0.2, alpha=0.8, beta=0.15,
+    def __init__(self, dim, steps=1, tau=0.2, alpha=0.9, beta=0.10,
                  detach_orientation=False):
         super().__init__()
         self.steps = steps
-        self.tau = tau
-        self.alpha = alpha # gain for along-edge (tangent) curvature
-        self.beta = beta # gain for across-edge (normal) curvature
+        # base parameters
+        self.tau0 = float(tau)
+        self.alpha0 = float(alpha)  # gain for along-edge (tangent) curvature
+        self.beta0 = float(beta)  # gain for across-edge (normal) curvature
+        self.scale = 1.0
+        self.ring = 1
         self.detach_orientation = detach_orientation
 
         # Gradients and blur for stable orientation
@@ -242,6 +157,10 @@ class DIFBlock(nn.Module):
         self.dxx = AOTfilter(dim, [[1, -2, 1], [2, -4, 2], [1, -2, 1]])
         self.dyy = AOTfilter(dim, [[1, 2, 1], [-2, -4, -2], [1, 2, 1]])
         self.dxy = AOTfilter(dim, [[1, 0, -1], [0, 0, 0], [-1, 0, 1]])
+
+    @torch.no_grad()
+    def set_schedule(self, scale: float = 1.0):
+        self.scale = float(scale)
 
     @torch.no_grad()
     def reset(self):
@@ -270,7 +189,7 @@ class DIFBlock(nn.Module):
         band = self._down_mask(mask, H, W) if mask is not None else None
         if band is None:
             band = torch.zeros(B, 1, H, W, device=x.device, dtype=x.dtype)
-        inner = get_ring(band, size=1)["inner"]
+        inner = get_ring(band, size=self.ring, blur_kernel=9, normalize=True)["inner"].to(band.dtype)
 
         with torch.no_grad():
             ctx = x * (1.0 - band)
@@ -285,12 +204,25 @@ class DIFBlock(nn.Module):
             # gradient direction (vx, vy) -> normal to edge
             # (-vy, vx) -> tangent to edge
             vx, vy = mean_x / magnitude, mean_y / magnitude
+
+            # smooth and renormalize orientation
+            vx = F.avg_pool2d(vx, kernel_size=3, stride=1, padding=1)
+            vy = F.avg_pool2d(vy, kernel_size=3, stride=1, padding=1)
+            den = (vx*vx + vy*vy).sqrt().clamp_min(eps)
+            vx = vx/den
+            vy = vy/den
+
             if self.detach_orientation:
                 vx = vx.detach()
                 vy = vy.detach()
 
             c_par = torch.sigmoid(4.0 * magnitude) # ~1 at strong edges
             c_perp = 0.25 * (1.0 - c_par)
+
+            # local CFL safety scaling for explicit step
+            q = (self.alpha0 * c_par).abs() + (self.beta0 * c_perp).abs()
+            safety = 0.33 # 1/3 for a 3x3 stencil
+            tau_eff = (self.tau0 * self.scale) * torch.clamp(safety / (q + eps), max=1.0)
 
         x_new = x
         for _ in range(self.steps):
@@ -304,9 +236,7 @@ class DIFBlock(nn.Module):
 
             d2n = vxvx * dxx + 2 * vxvy * dxy + vyvy * dyy # curvature along normal
             d2t = vyvy * dxx - 2 * vxvy * dxy + vxvx * dyy # curvature along tangent
-            step = self.tau * (
-                    self.alpha * c_par * d2t + self.beta * c_perp * d2n
-            )
-            step = step * inner
+            core = self.alpha0 * c_par * d2t + self.beta0 * c_perp * d2n
+            step = (tau_eff * core * inner).clamp(-0.05, 0.05)
             x_new = x_new + step
         return x_new

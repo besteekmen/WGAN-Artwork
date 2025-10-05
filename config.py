@@ -54,33 +54,39 @@ HOLE_LAMBDA = 4.0 # full weight for missing region, reduced from 6.0 to avoid la
 VALID_LAMBDA = 1.0 # smaller for known region (was 0.1)
 L1_LAMBDA = 1.0 # was 10.0 reconstruction loss weight
 TV_LAMBDA = 2e-4
+LAB_LAMBDA = 0.02
 EDGE_LAMBDA_SCHEDULE = [ # was constant before as EDGE_LAMBDA = 0.05
-    (0, 0.00),
-    (10, 0.015),
-    (20, 0.024),
-    (30, 0.030)
+    #(0, 0.00),
+    (0, 0.015),
+    (25, 0.018)
+    #(30, 0.030)
 ]
 STYLE_LAMBDA_SCHEDULE = [ # was constant before as STYLE_LAMBDA = 60.0
-    (0, 18.0),
-    (10, 36.0),
-    (20, 48.0),
-    (30, 60.0)
+    #(0, 18.0),
+    (0, 36.0)
+    #(20, 48.0)
+    #(30, 60.0)
 ]
 ADV_LAMBDA_SCHEDULE = [ # was constant before as ADV_LAMBDA = 0.005
-    (0, 0.005)
-    #(30, 0.0075),
+    (0, 0.005),
+    (20, 0.003)
     #(40, 0.01)
 ]
 PERCEPTUAL_LAMBDA_SCHEDULE = [ # was constant before as PERCEPTUAL_LAMBDA = 0.1
-    (0, 0.1),
-    (25, 0.075),
-    (35, 0.05)
+    (0, 0.1)
+    #(25, 0.075),
+    #(35, 0.05)
 ]
-EDGE_RING_SCHEDULE = [
-    (0, 3),
-    (3, 8),
-    (5, 12),
-    (8, 16)
+DIF_RING_SCHEDULE = [
+    (0, 1),
+    #(10, 2),
+    #(20, 1)
+]
+DIF_SCALE_SCHEDULE = [ # one scalar to rule them all :)
+    (0, 1.00),
+    (5, 0.85),
+    (15, 0.65),
+    (25, 0.50)
 ]
 ADV_LAMBDA = 0.005 # small weight for adversarial loss (for stable training)
 PERCEPTUAL_LAMBDA = 0.1 # Reduced from 0.05 for smoother early training
@@ -89,6 +95,8 @@ GP_LAMBDA = 20.0 # WGAN-GP penalty weight
 SCALES = [1.0, 0.5, 0.25] # multiscale factors
 SCALE_WEIGHTS = [1.0, 0.5, 0.25] # multiscale factor weights
 EDGE_RING = 2
+TV_RING = 2
+LAB_RING = 2
 
 # --- Datasets and paths ---
 OUT_PATH = 'out'
