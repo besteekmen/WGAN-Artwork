@@ -313,7 +313,8 @@ def main():
             ema.update() # update ema weights
 
             # Free memory for generator step
-            del adv_local, adv_global, real_patches, fake_patches
+            del real_features, fake_features, fake_scores
+            del adv_local, adv_global, real_patches, fake_patches,
             # -------------------------------------------------------------------
             # Step 3: Batch logging and visualizing
             # -------------------------------------------------------------------
