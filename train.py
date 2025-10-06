@@ -212,17 +212,21 @@ def main():
             with half_precision():
                 # Adversarial loss (negated critic scores)
                 adv_global = -globalD(composite).mean()
-                fake_patches = crop_roi(composite, mask_hole)
-                adv_local = -localD(fake_patches).mean()
-                losses["adv"] = adv_global + adv_local
 
-                # Feature Matching (only local) -------------------
+                fake_patches = crop_roi(composite, mask_hole)
                 real_patches = crop_roi(image, mask_hole)
-                _, real_features = localD(real_patches, True)
-                _, fake_features = localD(fake_patches, True)
+
+                fake_scores, fake_features = localD(fake_patches, True)
+                adv_local = -fake_scores.mean()
+
+                with torch.no_grad():
+                    _, real_features = localD(real_patches, True)
+
+                # Feature Matching
                 fm = lossFM(real_features, fake_features, weights=[0.5, 0.5])
+
                 losses["fm"] = fm_lambda * fm
-                # --------------------------------------------------
+                losses["adv"] = adv_global + adv_local
 
                 # Pixel-wise L1 loss (multiscale, under amp)
                 losses["l1"] = lossMSL1(image, fake, mask_hole)
