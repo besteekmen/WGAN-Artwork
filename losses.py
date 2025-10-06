@@ -234,12 +234,6 @@ def lossTV(x, mask, size=TV_RING):
     denom = (ringx.sum() + ringy.sum()).clamp_min(1.0)
     return (tvx + tvy) / denom
 
-def lossFM(real_features, fake_features, weights):
-    loss = 0.0
-    for w, rf, ff in zip(weights, real_features, fake_features):
-        loss += w * F.l1_loss(rf.mean(dim=(2,3)), ff.mean(dim=(2,3)))
-    return loss
-
 def lossLab(real, fake, mask, size=LAB_RING):
     """L1 on Lab(a,b) channels."""
     ring = get_ring(mask, size, blur_kernel=7, normalize=True)["both"].to(mask.dtype)

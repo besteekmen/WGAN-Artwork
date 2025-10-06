@@ -10,13 +10,13 @@ from time import perf_counter
 
 # Project specific modules
 from config import *
-from losses import gradient_penalty, init_losses, lossMSL1, init_metrics, lossEdge, lossTV, lossLab, lossFM
+from losses import gradient_penalty, init_losses, lossMSL1, init_metrics, lossEdge, lossTV, lossLab
 from models.model_builder import init_optimizers, init_nets, save_checkpoint, setup_model, forward_pass, init_ema, \
     save_ema
 from utils.utils import to_unit, set_seed, get_device, print_device, make_run_directory, half_precision, \
     full_precision, get_schedule, set_logger, is_cuda, clamp_f32, to_u8, freeze_rng, restore_rng
 from dataset import prepare_dataset, prepare_batch
-from utils.vision_utils import plot_loss, set_fixed, save_images, crop_roi, crop_coords
+from utils.vision_utils import plot_loss, set_fixed, save_images, crop_roi
 
 
 # ------------------------------------------------------------------------------
@@ -116,8 +116,6 @@ def main():
         lab_lambda = get_schedule(epoch, LAB_LAMBDA_SCHEDULE)
         irr_ratio = get_schedule(epoch, IRR_RATIO_SCHEDULE)
         dif_scale = get_schedule(epoch, DIF_SCALE_SCHEDULE)
-        noise = get_schedule(epoch, NOISE_SCHEDULE)
-        fm_lambda = get_schedule(epoch, FM_LAMBDA_SCHEDULE)
 
         if hasattr(netG, 'dif') and hasattr(netG, 'set_schedule'):
             netG.dif.set_schedule(dif_scale)
@@ -176,8 +174,8 @@ def main():
 
             # Update localD for local critic
             # Using detached versions for discriminator is okay, but not okay for generator
-            real_patches, roi_coords = crop_roi(image, mask_hole, coords=True, to_cpu=True)
-            fake_patches = crop_coords(composite_detached, roi_coords)
+            real_patches = crop_roi(image, mask_hole)
+            fake_patches = crop_roi(composite_detached, mask_hole)
             with half_precision():
                 real_local = localD(real_patches)
                 fake_local = localD(fake_patches)
@@ -206,25 +204,11 @@ def main():
             # Clear out the gradients for tracking
             optimG.zero_grad()
 
-            # Temporarily freeze D parameters so FM grads only flow to G
-            for p in globalD.parameters(): p.requires_grad_(False)
-            for p in localD.parameters(): p.requires_grad_(False)
-
-            fakeG_patches = crop_coords(composite, roi_coords)
-            realG_patches = crop_coords(image, roi_coords)
             with half_precision():
                 # Adversarial loss (negated critic scores)
                 adv_global = -globalD(composite).mean()
-                fake_scores, fake_features = localD(fakeG_patches, True)
-                adv_local = -fake_scores.mean()
-
-                with torch.no_grad():
-                    _, real_features = localD(realG_patches, True)
-
-                # Feature Matching
-                fm = lossFM(real_features, fake_features, weights=[0.3, 0.7])
-
-                losses["fm"] = fm_lambda * fm
+                patches = crop_roi(composite, mask_hole)
+                adv_local = -localD(patches).mean()
                 losses["adv"] = adv_global + adv_local
 
                 # Pixel-wise L1 loss (multiscale, under amp)
@@ -232,10 +216,6 @@ def main():
 
                 # Edge loss
                 losses["edge"] = lossEdge(image, fake)
-
-            # Unfreeze D parameters
-            for p in globalD.parameters(): p.requires_grad_(True)
-            for p in localD.parameters(): p.requires_grad_(True)
 
             # Style & Perceptual loss (no amp to avoid NaN, only full scale)
             with full_precision():
@@ -251,14 +231,13 @@ def main():
             losses["lab"] = lab
 
             # DEBUG only: Check for loss values to find the cause of NaN
-            all_terms = [losses["adv"], losses["fm"], losses["l1"], losses["edge"], sl, pl, tv, lab]
+            all_terms = [losses["adv"], losses["l1"], losses["edge"], sl, pl, tv, lab]
             with_nan = (not torch.isfinite(fake).all()) or (not all(torch.isfinite(x) for x in all_terms))
 
             if with_nan:
                 if i - nan_log_i >= 100:
                     message_skip = (f"[SKIP][epoch {epoch + 1}] iter {i} | "
                                     f"adv={float(losses['adv']) if torch.isfinite(losses['adv']) else 'NaN'} "
-                                    f"adv={float(losses['fm']) if torch.isfinite(losses['fm']) else 'NaN'} "
                                     f"l1={float(losses['l1']) if torch.isfinite(losses['l1']) else 'NaN'} "
                                     f"edge={float(losses['edge']) if torch.isfinite(losses['edge']) else 'NaN'} "
                                     f"style={float(losses['style']) if torch.isfinite(losses['style']) else 'NaN'} "
@@ -275,7 +254,6 @@ def main():
 
             # Final generator loss
             losses["totalG"] = (adv_lambda * losses["adv"] +
-                                fm_lambda * losses["fm"] +
                                 L1_LAMBDA * losses["l1"] +
                                 edge_lambda * losses["edge"] +
                                 style_lambda * losses["style"] +
@@ -290,10 +268,9 @@ def main():
             num_batches += 1
 
             if i % SAVE_FREQ == 0:
-                raw = {k: float(losses[k]) for k in ["adv", "fm", "l1", "edge", "style", "perceptual", "tv", "lab"]}
+                raw = {k: float(losses[k]) for k in ["adv", "l1", "edge", "style", "perceptual", "tv", "lab"]}
                 weighted = {
                     "adv_w": adv_lambda * raw["adv"],
-                    "fm_w": fm_lambda * raw["fm"],
                     "l1_w": L1_LAMBDA * raw["l1"],
                     "edge_w": edge_lambda * raw["edge"],
                     "style_w": style_lambda * raw["style"],
@@ -312,8 +289,7 @@ def main():
             ema.update() # update ema weights
 
             # Free memory for generator step
-            del real_features, fake_features, fake_scores
-            del adv_local, adv_global, realG_patches, fakeG_patches,
+            del adv_local, adv_global
             # -------------------------------------------------------------------
             # Step 3: Batch logging and visualizing
             # -------------------------------------------------------------------

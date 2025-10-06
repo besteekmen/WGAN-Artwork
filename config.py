@@ -76,11 +76,6 @@ PERCEPTUAL_LAMBDA_SCHEDULE = [ # was constant before as PERCEPTUAL_LAMBDA = 0.1
     (25, 0.075),
     (35, 0.05)
 ]
-FM_LAMBDA_SCHEDULE = [
-    (0, 0.0),
-    (5, 5.0),
-    (10, 8.0)
-]
 LAB_LAMBDA_SCHEDULE = [ # was constant before as 0.02
     (0, 0.00)
     #(5, 0.01),
