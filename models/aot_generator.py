@@ -153,7 +153,7 @@ def AOTfilter(channel, kernel, norm=None):
     return nn.Sequential(pad, conv)
 
 class DIFBlock(nn.Module):
-    def __init__(self, dim, steps=1, tau=0.15, alpha=0.9, beta=0.10,
+    def __init__(self, dim, steps=1, tau=0.12, alpha=0.9, beta=0.10,
                  detach_orientation=False):
         super().__init__()
         self.steps = steps

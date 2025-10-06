@@ -49,6 +49,11 @@ def get_ring(x, size=3, blur_kernel=0, normalize=False):
             ring[k] = r.clamp_(0,1)
     return ring
 
+def add_noise(x, sigma):
+    if sigma <= 0: return x
+    n = torch.randn_like(x) * sigma
+    return (x + n).clamp_(-1,1) # tensors are in [-1,1]
+
 def crop_local_patch(images: torch.Tensor, masks_hole: torch.Tensor,
                      offsets: tuple[torch.Tensor, torch.Tensor],
                      pad_mode: str = 'reflect',

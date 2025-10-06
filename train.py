@@ -10,14 +10,13 @@ from time import perf_counter
 
 # Project specific modules
 from config import *
-from losses import gradient_penalty, init_losses, lossMSL1, init_metrics, lossEdge, lossTV, lossLab
+from losses import gradient_penalty, init_losses, lossMSL1, init_metrics, lossEdge, lossTV, lossLab, lossFM
 from models.model_builder import init_optimizers, init_nets, save_checkpoint, setup_model, forward_pass, init_ema, \
     save_ema
 from utils.utils import to_unit, set_seed, get_device, print_device, make_run_directory, half_precision, \
     full_precision, get_schedule, set_logger, is_cuda, clamp_f32, to_u8, freeze_rng, restore_rng
 from dataset import prepare_dataset, prepare_batch
-from utils.vision_utils import plot_loss, set_fixed, save_images, sample_offset, crop_roi
-
+from utils.vision_utils import plot_loss, set_fixed, save_images, sample_offset, crop_roi, add_noise
 
 # ------------------------------------------------------------------------------
 # Training function
@@ -116,6 +115,8 @@ def main():
         lab_lambda = get_schedule(epoch, LAB_LAMBDA_SCHEDULE)
         irr_ratio = get_schedule(epoch, IRR_RATIO_SCHEDULE)
         dif_scale = get_schedule(epoch, DIF_SCALE_SCHEDULE)
+        noise = get_schedule(epoch, NOISE_SCHEDULE)
+        fm_lambda = get_schedule(epoch, FM_LAMBDA_SCHEDULE)
 
         if hasattr(netG, 'dif') and hasattr(netG, 'set_schedule'):
             netG.dif.set_schedule(dif_scale)
@@ -158,8 +159,8 @@ def main():
 
             # Update globalD for global critic
             with half_precision():
-                real_global = globalD(image)
-                fake_global = globalD(composite_detached)
+                real_global = globalD(add_noise(image, noise))
+                fake_global = globalD(add_noise(composite_detached, noise))
             # For stability, gradient penalty HAS to be float32! (no amp)
             gp_global = gradient_penalty(globalD, image.float(), composite_detached.float(), device)
             loss_globalD = (fake_global.mean() - real_global.mean()) + GP_LAMBDA * gp_global
@@ -177,8 +178,8 @@ def main():
             real_patches = crop_roi(image, mask_hole)
             fake_patches = crop_roi(composite_detached, mask_hole)
             with half_precision():
-                real_local = localD(real_patches)
-                fake_local = localD(fake_patches)
+                real_local = localD(add_noise(real_patches, noise))
+                fake_local = localD(add_noise(fake_patches, noise))
             # For stability, gradient penalty HAS to be float32! (no amp)
             gp_local = gradient_penalty(localD, real_patches.float(), fake_patches.float(), device)
             loss_localD = (fake_local.mean() - real_local.mean()) + GP_LAMBDA * gp_local
@@ -204,18 +205,34 @@ def main():
             # Clear out the gradients for tracking
             optimG.zero_grad()
 
+            # Temporarily freeze D parameters so FM grads only flow to G
+            for p in globalD.parameters(): p.requires_grad_(False)
+            for p in localD.parameters(): p.requires_grad_(False)
+
             with half_precision():
                 # Adversarial loss (negated critic scores)
                 adv_global = -globalD(composite).mean()
-                patches = crop_roi(composite, mask_hole)
-                adv_local = -localD(patches).mean()
+                fake_patches = crop_roi(composite, mask_hole)
+                adv_local = -localD(fake_patches).mean()
                 losses["adv"] = adv_global + adv_local
+
+                # Feature Matching (only local) -------------------
+                real_patches = crop_roi(image, mask_hole)
+                _, real_features = localD(real_patches, True)
+                _, fake_features = localD(fake_patches, True)
+                fm = lossFM(real_features, fake_features, weights=[0.5, 0.5])
+                losses["fm"] = fm_lambda * fm
+                # --------------------------------------------------
 
                 # Pixel-wise L1 loss (multiscale, under amp)
                 losses["l1"] = lossMSL1(image, fake, mask_hole)
 
                 # Edge loss
                 losses["edge"] = lossEdge(image, fake)
+
+            # Unfreeze D parameters
+            for p in globalD.parameters(): p.requires_grad_(True)
+            for p in localD.parameters(): p.requires_grad_(True)
 
             # Style & Perceptual loss (no amp to avoid NaN, only full scale)
             with full_precision():
@@ -231,13 +248,14 @@ def main():
             losses["lab"] = lab
 
             # DEBUG only: Check for loss values to find the cause of NaN
-            all_terms = [losses["adv"], losses["l1"], losses["edge"], sl, pl, tv, lab]
+            all_terms = [losses["adv"], losses["fm"], losses["l1"], losses["edge"], sl, pl, tv, lab]
             with_nan = (not torch.isfinite(fake).all()) or (not all(torch.isfinite(x) for x in all_terms))
 
             if with_nan:
                 if i - nan_log_i >= 100:
                     message_skip = (f"[SKIP][epoch {epoch + 1}] iter {i} | "
                                     f"adv={float(losses['adv']) if torch.isfinite(losses['adv']) else 'NaN'} "
+                                    f"adv={float(losses['fm']) if torch.isfinite(losses['fm']) else 'NaN'} "
                                     f"l1={float(losses['l1']) if torch.isfinite(losses['l1']) else 'NaN'} "
                                     f"edge={float(losses['edge']) if torch.isfinite(losses['edge']) else 'NaN'} "
                                     f"style={float(losses['style']) if torch.isfinite(losses['style']) else 'NaN'} "
@@ -254,6 +272,7 @@ def main():
 
             # Final generator loss
             losses["totalG"] = (adv_lambda * losses["adv"] +
+                                fm_lambda * losses["fm"] +
                                 L1_LAMBDA * losses["l1"] +
                                 edge_lambda * losses["edge"] +
                                 style_lambda * losses["style"] +
@@ -268,9 +287,10 @@ def main():
             num_batches += 1
 
             if i % SAVE_FREQ == 0:
-                raw = {k: float(losses[k]) for k in ["adv", "l1", "edge", "style", "perceptual", "tv", "lab"]}
+                raw = {k: float(losses[k]) for k in ["adv", "fm", "l1", "edge", "style", "perceptual", "tv", "lab"]}
                 weighted = {
                     "adv_w": adv_lambda * raw["adv"],
+                    "fm_w": fm_lambda * raw["fm"],
                     "l1_w": L1_LAMBDA * raw["l1"],
                     "edge_w": edge_lambda * raw["edge"],
                     "style_w": style_lambda * raw["style"],
@@ -289,7 +309,7 @@ def main():
             ema.update() # update ema weights
 
             # Free memory for generator step
-            del adv_local, adv_global, patches
+            del adv_local, adv_global, real_patches, fake_patches
             # -------------------------------------------------------------------
             # Step 3: Batch logging and visualizing
             # -------------------------------------------------------------------
