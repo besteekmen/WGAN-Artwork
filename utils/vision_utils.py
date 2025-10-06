@@ -103,6 +103,75 @@ def crop_local_patch(images: torch.Tensor, masks_hole: torch.Tensor,
 
     return torch.cat(patches, dim=0)
 
+def crop_roi(images: torch.Tensor, masks_hole: torch.Tensor,
+             pad_mode: str = 'reflect',
+             patch_size: int = LOCAL_PATCH_SIZE,
+             base_margin: int = 16,
+             jitter: int = 16,
+             rand_extra: int = 16) -> torch.Tensor:
+    """
+    Returns a crop that fully contains the mask but the mask's
+    relative position and scale vary per sample.
+    returns: tensor of shape [B, C, patch_size, patch_size]
+    """
+    B, C, H, W = images.shape
+    out = []
+    for b in range(B):
+        m = masks_hole[b, 0] > 0.5
+        ys, xs = torch.where(m)
+        # if no hole, go to image center
+        if ys.numel() == 0:
+            y0 = max(0, H//2 - patch_size//2)
+            y1 = min(H, y0 + patch_size)
+            x0 = max(0, W//2 - patch_size//2)
+            x1 = min(W, x0 + patch_size)
+            crop = images[b:b+1, :, y0:y1, x0:x1]
+            crop = F.interpolate(crop, (patch_size, patch_size), mode='bilinear', align_corners=False)
+            out.append(crop)
+            continue
+
+        top, bottom = ys.min().item(), ys.max().item()
+        left, right = xs.min().item(), xs.max().item()
+        h, w = bottom - top + 1, right - left + 1
+
+        # Randomize margin
+        margin = base_margin + int(torch.randint(0, rand_extra+1, (1,)).item())
+        side = max(h, w) + 2 * margin
+
+        # Slack to move the ROI centered on the hole bbox
+        slack_y = max(0, side - h)
+        slack_x = max(0, side - w)
+
+        # start with a square ROI centered on the hole bbox
+        y0_c = (top + bottom - side) // 2
+        x0_c = (left + right - side) // 2
+
+        # Jitter but clamp to image bounds so the hole stay inside
+        j_y = int(torch.randint(-jitter, jitter+1, (1,)).item())
+        j_x = int(torch.randint(-jitter, jitter+1, (1,)).item())
+        y0 = max(0, min(H - side, y0_c + j_y))
+        x0 = max(0, min(W - side, x0_c + j_x))
+        y1 , x1 = y0 + side, x0 + side
+
+        # If ROI goes out, reflect pad
+        pad_top = max(0, -y0)
+        pad_left = max(0, -x0)
+        pad_bottom = max(0, y1 - H)
+        pad_right = max(0, x1 - W)
+        if any(p > 0 for p in (pad_left, pad_right, pad_top, pad_bottom)):
+            img = F.pad(images[b:b+1], (pad_left, pad_right, pad_top, pad_bottom), mode=pad_mode)
+            y0 += pad_top
+            y1 += pad_top
+            x0 += pad_left
+            x1 += pad_left
+        else:
+            img = images[b:b+1]
+
+        roi = img[:, :, y0:y1, x0:x1]
+        roi = F.interpolate(roi, (patch_size, patch_size), mode='bilinear', align_corners=False)
+        out.append(roi)
+    return torch.cat(out, dim=0)
+
 def sample_offset(batch_size: int = BATCH_SIZE, jitter: int = JITTER, device=None) -> tuple[torch.Tensor, torch.Tensor]:
     """Sample batch_size number of offsets in [-jitter, jitter]."""
     dy = torch.randint(-jitter, jitter + 1, (batch_size,), device=device)

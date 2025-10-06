@@ -27,27 +27,31 @@ class AOTGenerator(nn.Module):
 
         self.aot1 = AOTBlock(G_HIDDEN * 4)
         #self.aot2 = AOTBlock(G_HIDDEN * 4)
-        self.dif = DIFBlock(G_HIDDEN * 4, detach_orientation=True)
         self.aot3 = AOTBlock(G_HIDDEN * 4)
         self.aot4 = AOTBlock(G_HIDDEN * 4)
 
-        #self.deconv1 = nn.ConvTranspose2d(G_HIDDEN * 4, G_HIDDEN * 2, 4, stride=2, padding=1, bias=True)
-        #self.deconv2 = nn.ConvTranspose2d(G_HIDDEN * 2, G_HIDDEN, 4, stride=2, padding=1, bias=True)
-        #self.blur_up1 = AOTfilter(G_HIDDEN * 2, [[1,2,1],[2,4,2],[1,2,1]], norm=16.0)
-        #self.blur_up2 = AOTfilter(G_HIDDEN, [[1,2,1],[2,4,2],[1,2,1]], norm=16.0)
-        #self.to_rgb = nn.Conv2d(G_HIDDEN, 3, 3, padding=1)
+        self.deconv1 = nn.ConvTranspose2d(G_HIDDEN * 4, G_HIDDEN * 2, 4, stride=2, padding=1, bias=True)
+        self.deconv2 = nn.ConvTranspose2d(G_HIDDEN * 2, G_HIDDEN, 4, stride=2, padding=1, bias=True)
+        self.to_rgb = nn.Conv2d(G_HIDDEN, 3, 3, padding=1)
 
-        self.decoder = nn.Sequential(
-            # 7th layer
-            nn.ConvTranspose2d(G_HIDDEN * 4, G_HIDDEN * 2, 4, stride=2, padding=1, bias=True),
-            nn.ReLU(inplace=True),
-            # 8th layer
-            nn.ConvTranspose2d(G_HIDDEN * 2, G_HIDDEN, 4, stride=2, padding=1, bias=True),
-            nn.ReLU(inplace=True),
-            # 9th layer (to RGB)
-            nn.Conv2d(G_HIDDEN, 3, 3, padding=1)
-        )
         self.apply(weights_init_normal)
+
+        self.blur_up1 = AOTfilter(G_HIDDEN * 2, [[1, 2, 1], [2, 4, 2], [1, 2, 1]], norm=16.0)
+        self.blur_up2 = AOTfilter(G_HIDDEN, [[1, 2, 1], [2, 4, 2], [1, 2, 1]], norm=16.0)
+
+        #self.decoder = nn.Sequential(
+            # 7th layer
+        #    nn.ConvTranspose2d(G_HIDDEN * 4, G_HIDDEN * 2, 4, stride=2, padding=1, bias=True),
+        #    nn.ReLU(inplace=True),
+            # 8th layer
+        #    nn.ConvTranspose2d(G_HIDDEN * 2, G_HIDDEN, 4, stride=2, padding=1, bias=True),
+        #    nn.ReLU(inplace=True),
+            # 9th layer (to RGB)
+        #    nn.Conv2d(G_HIDDEN, 3, 3, padding=1)
+        #)
+
+        self.dif = DIFBlock(G_HIDDEN * 4, detach_orientation=True)
+        self.dif.reset()
 
         for m in self.modules():
             if isinstance(m, (DIFBlock)):
@@ -68,15 +72,15 @@ class AOTGenerator(nn.Module):
         x = self.aot3(x)
         x = self.aot4(x)
 
-        #x = self.deconv1(x)
-        #x = self.blur_up1(x)
-        #x = F.relu(x, inplace=True)
-        #x = self.deconv2(x)
-        #x = self.blur_up2(x)
-        #x = F.relu(x, inplace=True)
-        #x = self.to_rgb(x)
+        x = self.deconv1(x)
+        x = self.blur_up1(x)
+        x = F.relu(x, inplace=True)
+        x = self.deconv2(x)
+        x = self.blur_up2(x)
+        x = F.relu(x, inplace=True)
+        x = self.to_rgb(x)
 
-        x = self.decoder(x)
+        #x = self.decoder(x)
         return torch.tanh(x)
 
 def aot_layer_norm(features):
@@ -199,12 +203,14 @@ class DIFBlock(nn.Module):
     def forward(self, x, mask=None):
         B, C, H, W = x.shape
         band = self._down_mask(mask, H, W) if mask is not None else torch.zeros(B,1,H,W, device=x.device, dtype=x.dtype)
-        inner = get_ring(band, size=1)["inner"]
+        band_soft = F.avg_pool2d(band, kernel_size=5, stride=1, padding=2)
+        inner = get_ring(band_soft, size=2, blur_kernel=9, normalize=False)["inner"]
+        gate = (inner * inner).clamp_(0,1) # smooth gate with no hard edges
 
         with torch.no_grad():
-            # ctx = x * (1.0 - band) (try later for ctx direction only)
-            gx = self.blur(self.gx(x))
-            gy = self.blur(self.gy(x))
+            ctx = x * (1.0 - band_soft)
+            gx = self.blur(self.gx(ctx))
+            gy = self.blur(self.gy(ctx))
             mean_x = gx.mean(1, keepdim=True)
             mean_y = gy.mean(1, keepdim=True)
 
@@ -249,6 +255,7 @@ class DIFBlock(nn.Module):
             step = tau_eff * (
                 self.alpha * c_par * d2t + self.beta * c_perp * d2n
             )
-            step = step * inner
+            step = step * gate
+            step = step.clamp(-0.04, 0.04)
             x_new = x_new + step
         return x_new

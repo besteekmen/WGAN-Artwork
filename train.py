@@ -16,7 +16,8 @@ from models.model_builder import init_optimizers, init_nets, save_checkpoint, se
 from utils.utils import to_unit, set_seed, get_device, print_device, make_run_directory, half_precision, \
     full_precision, get_schedule, set_logger, is_cuda, clamp_f32, to_u8, freeze_rng, restore_rng
 from dataset import prepare_dataset, prepare_batch
-from utils.vision_utils import crop_local_patch, plot_loss, set_fixed, save_images, sample_offset
+from utils.vision_utils import plot_loss, set_fixed, save_images, sample_offset, crop_roi
+
 
 # ------------------------------------------------------------------------------
 # Training function
@@ -173,9 +174,8 @@ def main():
 
             # Update localD for local critic
             # Using detached versions for discriminator is okay, but not okay for generator
-            dy, dx = sample_offset(image.size(0), device=image.device)
-            real_patches = crop_local_patch(image, mask_hole, offsets=(dy, dx))
-            fake_patches = crop_local_patch(composite_detached, mask_hole, offsets=(dy, dx))
+            real_patches = crop_roi(image, mask_hole)
+            fake_patches = crop_roi(composite_detached, mask_hole)
             with half_precision():
                 real_local = localD(real_patches)
                 fake_local = localD(fake_patches)
@@ -207,7 +207,7 @@ def main():
             with half_precision():
                 # Adversarial loss (negated critic scores)
                 adv_global = -globalD(composite).mean()
-                patches = crop_local_patch(composite, mask_hole, offsets=(dy, dx))
+                patches = crop_roi(composite, mask_hole)
                 adv_local = -localD(patches).mean()
                 losses["adv"] = adv_global + adv_local
 
