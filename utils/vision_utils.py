@@ -49,11 +49,6 @@ def get_ring(x, size=3, blur_kernel=0, normalize=False):
             ring[k] = r.clamp_(0,1)
     return ring
 
-def add_noise(x, sigma):
-    if sigma <= 0: return x
-    n = torch.randn_like(x) * sigma
-    return (x + n).clamp_(-1,1) # tensors are in [-1,1]
-
 def crop_local_patch(images: torch.Tensor, masks_hole: torch.Tensor,
                      offsets: tuple[torch.Tensor, torch.Tensor],
                      pad_mode: str = 'reflect',
@@ -113,17 +108,25 @@ def crop_roi(images: torch.Tensor, masks_hole: torch.Tensor,
              patch_size: int = LOCAL_PATCH_SIZE,
              base_margin: int = 16,
              jitter: int = 16,
-             rand_extra: int = 16) -> torch.Tensor:
+             rand_extra: int = 16,
+             coords: bool = False,
+             to_cpu: bool = True
+             ):
     """
-    Returns a crop that fully contains the mask but the mask's
-    relative position and scale vary per sample.
-    returns: tensor of shape [B, C, patch_size, patch_size]
+    Returns a crop that fully contains the mask (with jitter),
+    resized to patch_size, but the mask's relative position
+    and scale vary per sample. If coords True, returns per-sample
+    coords and pads, so same ROI can be cropped later.
     """
     B, C, H, W = images.shape
     out = []
+    y0s, x0s, sides = [], [], []
+    tops, bottoms, lefts, rights = [], [], [], [] # for padding
+
     for b in range(B):
         m = masks_hole[b, 0] > 0.5
         ys, xs = torch.where(m)
+
         # if no hole, go to image center
         if ys.numel() == 0:
             y0 = max(0, H//2 - patch_size//2)
@@ -132,7 +135,17 @@ def crop_roi(images: torch.Tensor, masks_hole: torch.Tensor,
             x1 = min(W, x0 + patch_size)
             crop = images[b:b+1, :, y0:y1, x0:x1]
             crop = F.interpolate(crop, (patch_size, patch_size), mode='bilinear', align_corners=False)
+
+            # record coords (no outside pad here)
+            side = (y1 - y0)
             out.append(crop)
+            y0s.append(y0)
+            x0s.append(x0)
+            sides.append(side)
+            tops.append(0)
+            bottoms.append(0)
+            lefts.append(0)
+            rights.append(0)
             continue
 
         top, bottom = ys.min().item(), ys.max().item()
@@ -143,11 +156,7 @@ def crop_roi(images: torch.Tensor, masks_hole: torch.Tensor,
         margin = base_margin + int(torch.randint(0, rand_extra+1, (1,)).item())
         side = max(h, w) + 2 * margin
 
-        # Slack to move the ROI centered on the hole bbox
-        slack_y = max(0, side - h)
-        slack_x = max(0, side - w)
-
-        # start with a square ROI centered on the hole bbox
+        # Start with a square ROI centered on the hole bbox
         y0_c = (top + bottom - side) // 2
         x0_c = (left + right - side) // 2
 
@@ -156,13 +165,14 @@ def crop_roi(images: torch.Tensor, masks_hole: torch.Tensor,
         j_x = int(torch.randint(-jitter, jitter+1, (1,)).item())
         y0 = max(0, min(H - side, y0_c + j_y))
         x0 = max(0, min(W - side, x0_c + j_x))
-        y1 , x1 = y0 + side, x0 + side
+        y1, x1 = y0 + side, x0 + side
 
         # If ROI goes out, reflect pad
         pad_top = max(0, -y0)
         pad_left = max(0, -x0)
         pad_bottom = max(0, y1 - H)
         pad_right = max(0, x1 - W)
+
         if any(p > 0 for p in (pad_left, pad_right, pad_top, pad_bottom)):
             img = F.pad(images[b:b+1], (pad_left, pad_right, pad_top, pad_bottom), mode=pad_mode)
             y0 += pad_top
@@ -174,6 +184,63 @@ def crop_roi(images: torch.Tensor, masks_hole: torch.Tensor,
 
         roi = img[:, :, y0:y1, x0:x1]
         roi = F.interpolate(roi, (patch_size, patch_size), mode='bilinear', align_corners=False)
+        out.append(roi)
+
+        # record coords and pads
+        y0s.append(y0)
+        x0s.append(x0)
+        sides.append(side)
+        tops.append(pad_top)
+        bottoms.append(pad_bottom)
+        lefts.append(pad_left)
+        rights.append(pad_right)
+
+    patches = torch.cat(out, dim=0)
+
+    if not coords:
+        return patches
+
+    device = images.device
+    to_device = (lambda x: torch.tensor(x, device=device, dtype=torch.int64))
+    coords = {
+        "y0": to_device(y0s),
+        "x0": to_device(x0s),
+        "side": to_device(sides),
+        "pad_top": to_device(tops),
+        "pad_bottom": to_device(bottoms),
+        "pad_left": to_device(lefts),
+        "pad_right": to_device(rights)
+    }
+    if to_cpu:
+        coords = {k: v.cpu() for k, v in coords.items()}
+    return patches, coords
+
+def crop_coords(images: torch.Tensor, coords: dict,
+                patch_size: int = LOCAL_PATCH_SIZE, pad_mode: str = "reflect") -> torch.Tensor:
+    """Returns the ROI crop from the given coordinates."""
+    # Move coords to device
+    device = images.device
+    y0 = coords["y0"].to(device)
+    x0 = coords["x0"].to(device)
+    side = coords["side"].to(device)
+    top = coords["pad_top"].to(device)
+    bottom = coords["pad_bottom"].to(device)
+    left = coords["pad_left"].to(device)
+    right = coords["pad_right"].to(device)
+
+    B = images.size(0)
+    out = []
+
+    for b in range(B):
+        img = images[b:b+1]
+        if (top[b] | bottom[b] | left[b] | right[b]).item() != 0:
+            img = F.pad(img, (left[b].item(), right[b].item(), top[b].item(), bottom[b].item()), mode=pad_mode)
+
+        y = y0[b].item()
+        x = x0[b].item()
+        s = side[b].item()
+        roi = img[:, :, y:y+s, x:x+s]
+        roi = F.interpolate(roi, (patch_size, patch_size), mode="bilinear", align_corners=False)
         out.append(roi)
     return torch.cat(out, dim=0)
 

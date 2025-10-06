@@ -67,8 +67,8 @@ STYLE_LAMBDA_SCHEDULE = [ # was constant before as STYLE_LAMBDA = 60.0
     #(30, 60.0)
 ]
 ADV_LAMBDA_SCHEDULE = [ # was constant before as ADV_LAMBDA = 0.005
-    (0, 0.005)
-    #(30, 0.0075),
+    (0, 0.005),
+    (30, 0.0075)
     #(40, 0.01)
 ]
 PERCEPTUAL_LAMBDA_SCHEDULE = [ # was constant before as PERCEPTUAL_LAMBDA = 0.1
@@ -78,7 +78,6 @@ PERCEPTUAL_LAMBDA_SCHEDULE = [ # was constant before as PERCEPTUAL_LAMBDA = 0.1
 ]
 FM_LAMBDA_SCHEDULE = [
     (0, 0.0),
-    (2, 2.0),
     (5, 5.0),
     (10, 8.0)
 ]

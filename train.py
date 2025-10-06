@@ -16,7 +16,8 @@ from models.model_builder import init_optimizers, init_nets, save_checkpoint, se
 from utils.utils import to_unit, set_seed, get_device, print_device, make_run_directory, half_precision, \
     full_precision, get_schedule, set_logger, is_cuda, clamp_f32, to_u8, freeze_rng, restore_rng
 from dataset import prepare_dataset, prepare_batch
-from utils.vision_utils import plot_loss, set_fixed, save_images, sample_offset, crop_roi, add_noise
+from utils.vision_utils import plot_loss, set_fixed, save_images, crop_roi, crop_coords
+
 
 # ------------------------------------------------------------------------------
 # Training function
@@ -159,8 +160,8 @@ def main():
 
             # Update globalD for global critic
             with half_precision():
-                real_global = globalD(add_noise(image, noise))
-                fake_global = globalD(add_noise(composite_detached, noise))
+                real_global = globalD(image)
+                fake_global = globalD(composite_detached)
             # For stability, gradient penalty HAS to be float32! (no amp)
             gp_global = gradient_penalty(globalD, image.float(), composite_detached.float(), device)
             loss_globalD = (fake_global.mean() - real_global.mean()) + GP_LAMBDA * gp_global
@@ -175,11 +176,11 @@ def main():
 
             # Update localD for local critic
             # Using detached versions for discriminator is okay, but not okay for generator
-            real_patches = crop_roi(image, mask_hole)
-            fake_patches = crop_roi(composite_detached, mask_hole)
+            real_patches, roi_coords = crop_roi(image, mask_hole, coords=True, to_cpu=True)
+            fake_patches = crop_coords(composite_detached, roi_coords)
             with half_precision():
-                real_local = localD(add_noise(real_patches, noise))
-                fake_local = localD(add_noise(fake_patches, noise))
+                real_local = localD(real_patches)
+                fake_local = localD(fake_patches)
             # For stability, gradient penalty HAS to be float32! (no amp)
             gp_local = gradient_penalty(localD, real_patches.float(), fake_patches.float(), device)
             loss_localD = (fake_local.mean() - real_local.mean()) + GP_LAMBDA * gp_local
@@ -209,21 +210,19 @@ def main():
             for p in globalD.parameters(): p.requires_grad_(False)
             for p in localD.parameters(): p.requires_grad_(False)
 
+            fakeG_patches = crop_coords(composite, roi_coords)
+            realG_patches = crop_coords(image, roi_coords)
             with half_precision():
                 # Adversarial loss (negated critic scores)
                 adv_global = -globalD(composite).mean()
-
-                fake_patches = crop_roi(composite, mask_hole)
-                real_patches = crop_roi(image, mask_hole)
-
-                fake_scores, fake_features = localD(fake_patches, True)
+                fake_scores, fake_features = localD(fakeG_patches, True)
                 adv_local = -fake_scores.mean()
 
                 with torch.no_grad():
-                    _, real_features = localD(real_patches, True)
+                    _, real_features = localD(realG_patches, True)
 
                 # Feature Matching
-                fm = lossFM(real_features, fake_features, weights=[0.5, 0.5])
+                fm = lossFM(real_features, fake_features, weights=[0.3, 0.7])
 
                 losses["fm"] = fm_lambda * fm
                 losses["adv"] = adv_global + adv_local
@@ -314,7 +313,7 @@ def main():
 
             # Free memory for generator step
             del real_features, fake_features, fake_scores
-            del adv_local, adv_global, real_patches, fake_patches,
+            del adv_local, adv_global, realG_patches, fakeG_patches,
             # -------------------------------------------------------------------
             # Step 3: Batch logging and visualizing
             # -------------------------------------------------------------------
