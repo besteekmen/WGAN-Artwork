@@ -204,7 +204,7 @@ class DIFBlock(nn.Module):
         B, C, H, W = x.shape
         band = self._down_mask(mask, H, W) if mask is not None else torch.zeros(B,1,H,W, device=x.device, dtype=x.dtype)
         band_soft = F.avg_pool2d(band, kernel_size=5, stride=1, padding=2)
-        inner = get_ring(band_soft, size=2, blur_kernel=9, normalize=False)["inner"]
+        inner = get_ring(band_soft, size=1, blur_kernel=9, normalize=False)["inner"]
         gate = (inner * inner).clamp_(0,1) # smooth gate with no hard edges
 
         with torch.no_grad():
@@ -256,6 +256,6 @@ class DIFBlock(nn.Module):
                 self.alpha * c_par * d2t + self.beta * c_perp * d2n
             )
             step = step * gate
-            step = step.clamp(-0.04, 0.04)
+            step = step.clamp(-0.035, 0.035)
             x_new = x_new + step
         return x_new

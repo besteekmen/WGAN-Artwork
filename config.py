@@ -92,11 +92,6 @@ DIF_SCALE_SCHEDULE = [ # one scalar to rule them all :)
     (15, 0.65),
     (25, 0.50)
 ]
-NOISE_SCHEDULE = [
-    (0, 0.02),
-    (2, 0.01),
-    (4, 0.00)
-]
 ADV_LAMBDA = 0.005 # small weight for adversarial loss (for stable training)
 PERCEPTUAL_LAMBDA = 0.1 # Reduced from 0.05 for smoother early training
 # If textures too blurry, try 0.1
