@@ -57,19 +57,19 @@ TV_LAMBDA = 1e-4
 EDGE_LAMBDA_SCHEDULE = [ # was constant before as EDGE_LAMBDA = 0.05
     (0, 0.005),
     (10, 0.015),
-    (25, 0.020)
-    #(30, 0.030)
+    (20, 0.024),
+    (30, 0.030)
 ]
 STYLE_LAMBDA_SCHEDULE = [ # was constant before as STYLE_LAMBDA = 60.0
     (0, 18.0),
     (10, 36.0),
-    (20, 48.0)
-    #(30, 60.0)
+    (20, 48.0),
+    (30, 60.0)
 ]
 ADV_LAMBDA_SCHEDULE = [ # was constant before as ADV_LAMBDA = 0.005
     (0, 0.005),
-    (30, 0.0075)
-    #(40, 0.01)
+    (30, 0.0075),
+    (40, 0.01)
 ]
 PERCEPTUAL_LAMBDA_SCHEDULE = [ # was constant before as PERCEPTUAL_LAMBDA = 0.1
     (0, 0.1),
