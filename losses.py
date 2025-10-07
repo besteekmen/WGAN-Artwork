@@ -219,7 +219,7 @@ def lossEdge(real, fake):
 def lossTV(x, mask, size=TV_RING):
     """Return Total Variation (how much neighbours change).
     Calculate over the ring only, anisotropic so preserve edges."""
-    ring = get_ring(mask, size, blur_kernel=5, normalize=True)["both"].to(mask.dtype)
+    ring = get_ring(mask, size, blur_kernel=5, normalize=False)["both"].to(mask.dtype)
 
     # finite differences
     dx = (x[:, :, :, 1:] - x[:, :, :, :-1]).abs()

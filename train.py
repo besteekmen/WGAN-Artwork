@@ -289,7 +289,7 @@ def main():
             ema.update() # update ema weights
 
             # Free memory for generator step
-            del adv_local, adv_global
+            del adv_local, adv_global, patches
             # -------------------------------------------------------------------
             # Step 3: Batch logging and visualizing
             # -------------------------------------------------------------------
