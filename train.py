@@ -16,7 +16,7 @@ from models.model_builder import init_optimizers, init_nets, save_checkpoint, se
 from utils.utils import to_unit, set_seed, get_device, print_device, make_run_directory, half_precision, \
     full_precision, get_schedule, set_logger, is_cuda, clamp_f32, to_u8, freeze_rng, restore_rng
 from dataset import prepare_dataset, prepare_batch
-from utils.vision_utils import plot_loss, set_fixed, save_images, crop_roi
+from utils.vision_utils import plot_loss, set_fixed, save_images, sample_offset, crop_roi
 
 
 # ------------------------------------------------------------------------------
