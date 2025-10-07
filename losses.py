@@ -4,9 +4,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torchvision.models as tvmodels
-import kornia.color as Kcolor
 
-from config import SCALES, HOLE_LAMBDA, VALID_LAMBDA, EPS, EDGE_RING, LAB_RING, TV_RING
+from config import SCALES, HOLE_LAMBDA, VALID_LAMBDA, EPS, TV_RING
 from utils.utils import get_device, to_unit
 from torchmetrics.image.ssim import StructuralSimilarityIndexMeasure
 from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
@@ -233,18 +232,3 @@ def lossTV(x, mask, size=TV_RING):
     tvy = (dy.abs() * ringy).sum()
     denom = (ringx.sum() + ringy.sum()).clamp_min(1.0)
     return (tvx + tvy) / denom
-
-def lossLab(real, fake, mask, size=LAB_RING):
-    """L1 on Lab(a,b) channels."""
-    ring = get_ring(mask, size, blur_kernel=7, normalize=True)["both"].to(mask.dtype)
-
-    # sRGB [-1, 1] -> RGB [0, 1] -> Lab (D65) on GPU
-    r_lab = Kcolor.rgb_to_lab(to_unit(real))
-    f_lab = Kcolor.rgb_to_lab(to_unit(fake))
-
-    # chroma channels
-    diff = (r_lab[:, 1:2] - f_lab[:, 1:2]).abs() + (r_lab[:, 2:3] - f_lab[:, 2:3]).abs()
-
-    num = (diff * ring).flatten(1).sum(1)
-    denom = ring.flatten(1).sum(1).clamp_min(1.0)
-    return (num / denom).mean()

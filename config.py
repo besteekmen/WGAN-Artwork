@@ -76,11 +76,6 @@ PERCEPTUAL_LAMBDA_SCHEDULE = [ # was constant before as PERCEPTUAL_LAMBDA = 0.1
     (25, 0.075),
     (35, 0.05)
 ]
-LAB_LAMBDA_SCHEDULE = [ # was constant before as 0.02
-    (0, 0.00)
-    #(5, 0.01),
-    #(15, 0.02)
-]
 DIF_RING_SCHEDULE = [
     (0, 1),
     #(10, 2),
@@ -98,9 +93,7 @@ PERCEPTUAL_LAMBDA = 0.1 # Reduced from 0.05 for smoother early training
 GP_LAMBDA = 20.0 # WGAN-GP penalty weight
 SCALES = [1.0, 0.5, 0.25] # multiscale factors
 SCALE_WEIGHTS = [1.0, 0.5, 0.25] # multiscale factor weights
-EDGE_RING = 2
 TV_RING = 2
-LAB_RING = 2
 
 # --- Datasets and paths ---
 OUT_PATH = 'out'

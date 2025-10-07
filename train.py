@@ -10,13 +10,13 @@ from time import perf_counter
 
 # Project specific modules
 from config import *
-from losses import gradient_penalty, init_losses, lossMSL1, init_metrics, lossEdge, lossTV, lossLab
+from losses import gradient_penalty, init_losses, lossMSL1, init_metrics, lossEdge, lossTV
 from models.model_builder import init_optimizers, init_nets, save_checkpoint, setup_model, forward_pass, init_ema, \
     save_ema
 from utils.utils import to_unit, set_seed, get_device, print_device, make_run_directory, half_precision, \
     full_precision, get_schedule, set_logger, is_cuda, clamp_f32, to_u8, freeze_rng, restore_rng
 from dataset import prepare_dataset, prepare_batch
-from utils.vision_utils import plot_loss, set_fixed, save_images, sample_offset, crop_roi
+from utils.vision_utils import plot_loss, set_fixed, save_images, sample_offset, crop_roi, crop_local_patch
 
 
 # ------------------------------------------------------------------------------
@@ -113,7 +113,6 @@ def main():
         perc_lambda = get_schedule(epoch, PERCEPTUAL_LAMBDA_SCHEDULE)
         style_lambda = get_schedule(epoch, STYLE_LAMBDA_SCHEDULE)
         edge_lambda = get_schedule(epoch, EDGE_LAMBDA_SCHEDULE)
-        lab_lambda = get_schedule(epoch, LAB_LAMBDA_SCHEDULE)
         irr_ratio = get_schedule(epoch, IRR_RATIO_SCHEDULE)
         dif_scale = get_schedule(epoch, DIF_SCALE_SCHEDULE)
 
@@ -174,8 +173,12 @@ def main():
 
             # Update localD for local critic
             # Using detached versions for discriminator is okay, but not okay for generator
-            real_patches = crop_roi(image, mask_hole)
-            fake_patches = crop_roi(composite_detached, mask_hole)
+            dy, dx = sample_offset(image.size(0), device=image.device)
+            real_patches = crop_local_patch(image, mask_hole, offsets=(dy, dx))
+            fake_patches = crop_local_patch(composite_detached, mask_hole, offsets=(dy, dx))
+            #real_patches = crop_roi(image, mask_hole)
+            #fake_patches = crop_roi(composite_detached, mask_hole)
+
             with half_precision():
                 real_local = localD(real_patches)
                 fake_local = localD(fake_patches)
@@ -207,7 +210,10 @@ def main():
             with half_precision():
                 # Adversarial loss (negated critic scores)
                 adv_global = -globalD(composite).mean()
-                patches = crop_roi(composite, mask_hole)
+
+                patches = crop_local_patch(composite, mask_hole, offsets=(dy, dx))
+                #patches = crop_roi(composite, mask_hole)
+
                 adv_local = -localD(patches).mean()
                 losses["adv"] = adv_global + adv_local
 
@@ -224,14 +230,12 @@ def main():
                 sl = lossStyle(orig_full, comp_full)
                 pl = lossPerceptual(orig_full, comp_full)
                 tv = lossTV(comp_full, mask_hole)
-                lab = lossLab(orig_full, comp_full, mask_hole)
             losses["style"] = sl
             losses["perceptual"] = pl
             losses["tv"] = tv
-            losses["lab"] = lab
 
             # DEBUG only: Check for loss values to find the cause of NaN
-            all_terms = [losses["adv"], losses["l1"], losses["edge"], sl, pl, tv, lab]
+            all_terms = [losses["adv"], losses["l1"], losses["edge"], sl, pl, tv]
             with_nan = (not torch.isfinite(fake).all()) or (not all(torch.isfinite(x) for x in all_terms))
 
             if with_nan:
@@ -242,8 +246,7 @@ def main():
                                     f"edge={float(losses['edge']) if torch.isfinite(losses['edge']) else 'NaN'} "
                                     f"style={float(losses['style']) if torch.isfinite(losses['style']) else 'NaN'} "
                                     f"perceptual={float(losses['perceptual']) if torch.isfinite(losses['perceptual']) else 'NaN'} "
-                                    f"tv={float(losses['tv']) if torch.isfinite(losses['tv']) else 'NaN'} "
-                                    f"lab={float(losses['lab']) if torch.isfinite(losses['lab']) else 'NaN'}")
+                                    f"tv={float(losses['tv']) if torch.isfinite(losses['tv']) else 'NaN'} ")
                     train_tqdm.write(message_skip)
                     logger.info(message_skip)
                     nan_log_i = i
@@ -258,8 +261,7 @@ def main():
                                 edge_lambda * losses["edge"] +
                                 style_lambda * losses["style"] +
                                 perc_lambda * losses["perceptual"] +
-                                TV_LAMBDA * losses["tv"] +
-                                lab_lambda * losses["lab"])
+                                TV_LAMBDA * losses["tv"])
 
             g_tot += losses["totalG"].detach()
             d_tot += losses["totalD"].detach()
@@ -268,15 +270,14 @@ def main():
             num_batches += 1
 
             if i % SAVE_FREQ == 0:
-                raw = {k: float(losses[k]) for k in ["adv", "l1", "edge", "style", "perceptual", "tv", "lab"]}
+                raw = {k: float(losses[k]) for k in ["adv", "l1", "edge", "style", "perceptual", "tv"]}
                 weighted = {
                     "adv_w": adv_lambda * raw["adv"],
                     "l1_w": L1_LAMBDA * raw["l1"],
                     "edge_w": edge_lambda * raw["edge"],
                     "style_w": style_lambda * raw["style"],
                     "perceptual_w": perc_lambda * raw["perceptual"],
-                    "tv_w": TV_LAMBDA * raw["tv"],
-                    "lab_w": lab_lambda * raw["lab"]
+                    "tv_w": TV_LAMBDA * raw["tv"]
                 }
                 logger.info(f"[Debug] Raw: {raw} | Weighted: {weighted}")
 
@@ -361,7 +362,7 @@ def main():
 
         with torch.no_grad():
             ssim_tot, lpips_tot = 0.0, 0.0
-            l1_tot, edge_tot, style_tot, perc_tot, tv_tot, lab_tot = 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
+            l1_tot, edge_tot, style_tot, perc_tot, tv_tot= 0.0, 0.0, 0.0, 0.0, 0.0
             val_batches = 0
 
             for image, mask in val_loader:
@@ -393,7 +394,6 @@ def main():
                     vsl = lossStyle(orig_full, comp_full)
                     vpl = lossPerceptual(orig_full, comp_full)
                     vtv = lossTV(comp_full, mask_hole)
-                    vlab = lossLab(orig_full, comp_full, mask_hole)
 
                 # Loss totals for averaging
                 l1_tot += l1_loss.item()
@@ -401,7 +401,6 @@ def main():
                 style_tot += vsl.item()
                 perc_tot += vpl.item()
                 tv_tot += vtv.item()
-                lab_tot += vlab.item()
 
         # Continue with saved random state
         restore_rng(r, n, t, c)
@@ -417,15 +416,13 @@ def main():
         avg_style = style_tot / val_batches
         avg_perc = perc_tot / val_batches
         avg_tv = tv_tot / val_batches
-        avg_lab = lab_tot / val_batches
 
         val_g = (
             L1_LAMBDA * avg_l1 +
             edge_lambda * avg_edge +
             style_lambda * avg_style +
             perc_lambda * avg_perc +
-            TV_LAMBDA * avg_tv +
-            lab_lambda * avg_lab
+            TV_LAMBDA * avg_tv
         )
 
         avg_val_ssim = ssim_tot / val_batches
@@ -439,8 +436,7 @@ def main():
             f"Edge={avg_edge:.4f}, "
             f"Style={avg_style:.4f}, "
             f"Perc={avg_perc:.4f}, "
-            f"TV={avg_tv:.4f}, "
-            f"Lab={avg_lab:.4f} | "
+            f"TV={avg_tv:.4f} | "
             f"SSIM={avg_val_ssim:.4f}, "
             f"LPIPS={avg_val_lpips:.4f}"
         )
