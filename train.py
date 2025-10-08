@@ -174,12 +174,10 @@ def main():
             # Update localD for local critic
             # Using detached versions for discriminator is okay, but not okay for generator
             dy, dx = sample_offset(image.size(0), device=image.device)
-            real_patches = crop_local_patch(image, mask_hole, offsets=(dy, dx))
-            fake_patches = crop_local_patch(composite_detached, mask_hole, offsets=(dy, dx))
-            #real_patches = crop_roi(image, mask_hole)
-            #fake_patches = crop_roi(composite_detached, mask_hole)
 
             with half_precision():
+                real_patches = crop_local_patch(image, mask_hole, offsets=(dy, dx))
+                fake_patches = crop_local_patch(composite_detached, mask_hole, offsets=(dy, dx))
                 real_local = localD(real_patches)
                 fake_local = localD(fake_patches)
             # For stability, gradient penalty HAS to be float32! (no amp)
@@ -210,10 +208,7 @@ def main():
             with half_precision():
                 # Adversarial loss (negated critic scores)
                 adv_global = -globalD(composite).mean()
-
                 patches = crop_local_patch(composite, mask_hole, offsets=(dy, dx))
-                #patches = crop_roi(composite, mask_hole)
-
                 adv_local = -localD(patches).mean()
                 losses["adv"] = adv_global + adv_local
 
@@ -327,7 +322,7 @@ def main():
                 with torch.no_grad():
                     masked = image * (1.0 - mask_hole)
                     save_images(to_unit(image), to_unit(masked), to_unit(composite), 3,  # horizontal stack per sample using width dimension
-                                1, out_path, f'comparison_epoch({epoch})_batch({i}).png')
+                                1, out_path, f'comparison_epoch({epoch})_batch({i}).jpg')
                 last_end = perf_counter()
             else:
                 last_end = perf_counter()
@@ -498,7 +493,7 @@ def main():
 
             # Save the current batch (16) images: [image1 | image2 | image3 | ...]
             save_images(unit_image, unit_masked, unit_comp, 0, # vertical stack per sample
-                        fixed_image.size(0), out_path, f'fixed_epoch{epoch+1}.png')
+                        fixed_image.size(0), out_path, f'fixed_epoch{epoch+1}.jpg')
 
             # Restore training weights
             ema.restore()

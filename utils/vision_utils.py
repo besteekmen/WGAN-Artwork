@@ -6,6 +6,7 @@ import torchvision.utils as vutils
 from PIL import ImageOps
 import PIL.Image as PILImage
 from matplotlib import pyplot as plt
+from torch.onnx.symbolic_opset11 import clamp_min
 from torchvision import transforms
 
 from config import LOCAL_PATCH_SIZE, SCALES, BATCH_SIZE, JITTER, SEED, EPS
@@ -49,7 +50,7 @@ def get_ring(x, size=3, blur_kernel=0, normalize=False):
             ring[k] = r.clamp_(0,1)
     return ring
 
-def crop_local_patch(images: torch.Tensor, masks_hole: torch.Tensor,
+def crop_local_patch2(images: torch.Tensor, masks_hole: torch.Tensor,
                      offsets: tuple[torch.Tensor, torch.Tensor],
                      pad_mode: str = 'reflect',
                      patch_size: int = LOCAL_PATCH_SIZE) -> torch.Tensor:
@@ -102,6 +103,102 @@ def crop_local_patch(images: torch.Tensor, masks_hole: torch.Tensor,
         patches.append(padded[b:b+1, :, yy:yy+patch_size, xx:xx+patch_size])
 
     return torch.cat(patches, dim=0)
+
+def crop_local_patch(images: torch.Tensor, masks_hole: torch.Tensor,
+                     offsets: tuple[torch.Tensor, torch.Tensor],
+                     pad_mode: str = 'reflection',
+                     patch_size: int = LOCAL_PATCH_SIZE,
+                     margin: int = 16) -> torch.Tensor:
+    """
+    Batched ROI crop that fully contains the mask with a margin,
+    then applies offsets and resamples to [patch_size, patch_size].
+
+    Args:
+        images: tensor of shape [B, C, H, W],
+        masks_hole: tensor of shape [B, 1, H, W], (1=hole, 0=known)
+        offsets: (dy, dx) tensors of shape [B],
+        pad_mode: 'reflection'
+        patch_size: size of patches to be cropped
+        margin: margin added around to form ROI
+    Returns:
+        patches: tensor of shape [B, C, patch_size, patch_size]
+    """
+    B, C, H, W = images.shape
+    device, dtype = images.device, images.dtype
+
+    hole = (masks_hole > 0.5).squeeze(1)  # [B, H, W] bool
+    has_hole = hole.any(dim=(1,2))  # [B] bool
+    rows = hole.any(dim=2)  # [B, H] any across W
+    cols = hole.any(dim=1)  # [B, W] any across H
+
+    # Hole bbox (vectorized), all [B]
+    top = rows.float().argmax(dim=1)
+    bottom = (H - 1) - torch.flip(rows, [1]).float().argmax(dim=1)
+    left = cols.float().argmax(dim=1)
+    right = (W - 1) - torch.flip(cols, [1]).float().argmax(dim=1)
+    top_f, bottom_f = top.to(dtype), bottom.to(dtype)
+    left_f, right_f = left.to(dtype), right.to(dtype)
+
+    # Center if no hole
+    cy_no = torch.full_like(top, H // 2)
+    cx_no = torch.full_like(left, W // 2)
+
+    # Bbox center
+    cy_bb = ((top + bottom).float()) * 0.5  # [B]
+    cx_bb = ((left + right).float()) * 0.5  # [B]
+    cy = torch.where(has_hole, cy_bb, cy_no.float())
+    cx = torch.where(has_hole, cx_bb, cx_no.float())
+
+    # ROI square one side = max(h,w) + 2*margin, at least patch_size
+    h = (bottom - top + 1).clamp_min(1).float()
+    w = (right - left + 1).clamp_min(1).float()
+    side = torch.max(h, w) + 2.0 * float(margin)
+    side = side.clamp_min(float(patch_size))
+
+    # Scalar helpers for bounds
+    H_t = torch.tensor(float(H), device=device, dtype=dtype)
+    W_t = torch.tensor(float(W), device=device, dtype=dtype)
+    margin_t = torch.tensor(float(margin), device=device, dtype=dtype)
+    zero = torch.tensor(0.0, device=device, dtype=dtype)
+    max_y0 = (H_t - side).clamp_min(zero) # [B]
+    max_x0 = (W_t - side).clamp_min(zero) # [B]
+
+    # Ensure ROI fully covers bbox after jitter
+    # y0 must be in [top - margin, bottom + margin - side + 1] etc
+    y0_min = (top_f - margin_t).clamp(min=zero, max=max_y0)
+    y0_max = (bottom_f + margin_t - side + 1).clamp(min=zero, max=max_y0)
+    x0_min = (left_f - margin_t).clamp(min=zero, max=max_x0)
+    x0_max = (right_f + margin_t - side + 1).clamp(min=zero, max=max_x0)
+
+    # Apply jitter and clamp to safe ranges
+    dy, dx = offsets
+    dy = dy.to(device=device, dtype=torch.float32)
+    dx = dx.to(device=device, dtype=torch.float32)
+    y0_c = (cy - 0.5 * (side - 1.0)).floor()
+    x0_c = (cx - 0.5 * (side - 1.0)).floor()
+    y0 = (y0_c + dy).clamp(y0_min, y0_max)
+    x0 = (x0_c + dx).clamp(x0_min, x0_max)
+
+    # Map ROI
+    cy_roi = y0 + 0.5 * (side - 1.0)
+    cx_roi = x0 + 0.5 * (side - 1.0)
+
+    # Normalize by scale and translation
+    sx = side / max(W - 1, 1)
+    sy = side / max(H - 1, 1)
+    tx = (2.0 * cx_roi / max(W - 1, 1)) - 1.0
+    ty = (2.0 * cy_roi / max(H - 1, 1)) - 1.0
+
+    theta = torch.zeros(B, 2, 3, device=device, dtype=dtype)
+    theta[:, 0, 0] = sx
+    theta[:, 1, 1] = sy
+    theta[:, 0, 2] = tx
+    theta[:, 1, 2] = ty
+
+    grid = F.affine_grid(theta, size=([B, C, patch_size, patch_size]), align_corners=True)
+    patches = F.grid_sample(images, grid, mode="bilinear",
+                            padding_mode=pad_mode, align_corners=True)
+    return patches
 
 def crop_roi(images: torch.Tensor, masks_hole: torch.Tensor,
              pad_mode: str = 'reflect',

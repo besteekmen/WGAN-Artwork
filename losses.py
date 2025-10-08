@@ -168,12 +168,14 @@ def gradient_penalty(critic, real, fake, device):
     return ((grad_norm - 1) ** 2).mean()
 
 def masked_l1(x, y, mask):
-    diff = (x - y).abs()
-    # normalize by mask area for stability (mask size invariant, per pixel error)
-    # [B, 1, H, W] -> [B, 1*H*W] -> [B] by flatten and sum -> scalar by mean
-    num = (diff * mask).flatten(1).sum(1)
-    denom = torch.clamp(mask.flatten(1).sum(1) + EPS, min=1.0)
-    return (num / denom).mean()
+    """Mean |x-y| over elements where mask==1, normalized by the number
+    of selected elements (including channels), averaged over batch
+    """
+    diff = (x - y).abs() # [B,C,H,W]
+    # normalize by mask area for stability (mask size invariant)
+    num = (diff * mask).sum(dim=(1, 2, 3)) # [B]
+    denom = (mask.sum(dim=(1, 2, 3)) * x.size(1)).clamp_min(EPS) # [B]
+    return (num / denom).mean() # scalar
 
 def lossMSL1(real, fake, mask):
     """Calculate multiscale loss for a given loss function.
@@ -188,13 +190,22 @@ def lossMSL1(real, fake, mask):
         fake: [B, 3, H, W] values in [-1, 1]
         mask: [B, 1, H, W] values in [0, 1], (1=hole, 0=known)
     """
-    multi_loss = 0
+    frac_hole = mask.mean().detach() # tensor scalar on CUDA
+    frac_valid = 1.0 - frac_hole
+
     r_scale = downsample(real, SCALES)
     f_scale = downsample(fake, SCALES)
     m_scale = downsample(mask, SCALES)
+    multi_loss = 0
+
+    #multi_loss = real.new_tensor(0.0) # GPU scalar (no switch to CPU)
     for ors, fs, ms in zip(r_scale, f_scale, m_scale):
-        multi_loss += HOLE_LAMBDA * F.l1_loss(fs * ms, ors * ms) + \
-                      VALID_LAMBDA * F.l1_loss(fs * (1.0 - ms), ors * (1.0 - ms))
+        ms = ms.clamp(0.0, 1.0)
+        hole = masked_l1(fs, ors, ms)
+        valid = masked_l1(fs, ors, 1.0 - ms)
+        multi_loss += HOLE_LAMBDA * hole * frac_hole + VALID_LAMBDA * valid * frac_valid
+        #multi_loss += HOLE_LAMBDA * F.l1_loss(fs * ms, ors * ms) + \
+        #              VALID_LAMBDA * F.l1_loss(fs * (1.0 - ms), ors * (1.0 - ms))
     return multi_loss / len(SCALES)
 
 def sobel(x):

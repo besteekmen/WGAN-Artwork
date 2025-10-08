@@ -77,8 +77,8 @@ PERCEPTUAL_LAMBDA_SCHEDULE = [ # was constant before as PERCEPTUAL_LAMBDA = 0.1
     (35, 0.05)
 ]
 DIF_RING_SCHEDULE = [
-    (0, 1),
-    #(10, 2),
+    (0, 2)
+    #(5, 1)
     #(20, 1)
 ]
 DIF_SCALE_SCHEDULE = [ # one scalar to rule them all :)

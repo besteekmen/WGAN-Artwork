@@ -2,6 +2,7 @@ import os
 import random
 import numpy as np
 import torch
+import cv2
 
 from PIL import Image, ImageOps
 from torch.utils.data import Dataset
@@ -12,7 +13,6 @@ from torchvision.transforms.functional import rotate
 from tqdm import tqdm
 from utils.utils import is_cuda, clear_folder
 from config import DATA_PATH, BATCH_SIZE, NUM_WORKERS, CROP_SIZE, SEED, EPS
-import cv2
 
 class CroppedImageDataset(Dataset):
     """Dataset of previously cropped images.
