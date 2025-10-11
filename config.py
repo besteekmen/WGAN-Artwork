@@ -92,7 +92,6 @@ PERCEPTUAL_LAMBDA = 0.1 # Reduced from 0.05 for smoother early training
 # If textures too blurry, try 0.1
 GP_LAMBDA = 20.0 # WGAN-GP penalty weight
 SCALES = [1.0, 0.5, 0.25] # multiscale factors
-SCALE_WEIGHTS = [1.0, 0.5, 0.25] # multiscale factor weights
 TV_RING = 2
 
 # --- Datasets and paths ---

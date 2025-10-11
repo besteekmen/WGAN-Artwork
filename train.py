@@ -12,11 +12,11 @@ from time import perf_counter
 from config import *
 from losses import gradient_penalty, init_losses, lossMSL1, init_metrics, lossEdge, lossTV
 from models.model_builder import init_optimizers, init_nets, save_checkpoint, setup_model, forward_pass, init_ema, \
-    save_ema
+    save_ema, set_grads
 from utils.utils import to_unit, set_seed, get_device, print_device, make_run_directory, half_precision, \
     full_precision, get_schedule, set_logger, is_cuda, clamp_f32, to_u8, freeze_rng, restore_rng
 from dataset import prepare_dataset, prepare_batch
-from utils.vision_utils import plot_loss, set_fixed, save_images, sample_offset, crop_roi, crop_local_patch
+from utils.vision_utils import plot_loss, set_fixed, save_images, sample_offset, crop_local_patch
 
 
 # ------------------------------------------------------------------------------
@@ -86,7 +86,7 @@ def main():
     global_step = 0
     start_time = datetime.now()
     tolerance = TOL
-    best_fid = float("inf")
+    best_valG = float("inf")
     early_stopping = False
 
     data_time_ema = None
@@ -116,7 +116,7 @@ def main():
         irr_ratio = get_schedule(epoch, IRR_RATIO_SCHEDULE)
         dif_scale = get_schedule(epoch, DIF_SCALE_SCHEDULE)
 
-        if hasattr(netG, 'dif') and hasattr(netG, 'set_schedule'):
+        if hasattr(netG, 'dif') and hasattr(netG.dif, 'set_schedule'):
             netG.dif.set_schedule(dif_scale)
 
         # Set training mode
@@ -146,6 +146,9 @@ def main():
             # -------------------------------------------------------------------
             # Step 1: Discriminators training as critics (WGAN-GP)
             # -------------------------------------------------------------------
+            set_grads(globalD, True)
+            set_grads(localD, True)
+
             # Clear out the gradients for tracking
             optimGD.zero_grad()
             optimLD.zero_grad()
@@ -202,6 +205,10 @@ def main():
             # -------------------------------------------------------------------
             # Step 2: Generator training
             # -------------------------------------------------------------------
+            # Freeze D to avoid accumulating grads for D in G step
+            set_grads(globalD, False)
+            set_grads(localD, False)
+
             # Clear out the gradients for tracking
             optimG.zero_grad()
 
@@ -283,6 +290,10 @@ def main():
             scalerG.step(optimG)
             scalerG.update()
             ema.update() # update ema weights
+
+            # Unfreeze D for the next D step
+            set_grads(globalD, True)
+            set_grads(localD, True)
 
             # Free memory for generator step
             del adv_local, adv_global, patches
@@ -444,6 +455,19 @@ def main():
             f"lD={elog['localD'][-1]:.4f}"
         )
 
+        if val_g < best_valG:
+            best_valG = val_g
+            tolerance = TOL  # reset if improved
+            # save best
+            save_checkpoint(epoch, netG, globalD, localD, optimG, optimGD, optimLD, check_path, ema)
+            save_ema(netG, ema, check_path)
+        else:
+            tolerance -= 1
+            if tolerance <= 0:
+                print(f"valG STOP: Early stopping at epoch {epoch + 1}/{EPOCH_NUM}")
+                logger.info(f"valG STOP: Early stopping at epoch {epoch + 1}/{EPOCH_NUM}")
+                early_stopping = True
+
         # -----------------------------------------------------------------------
         # Save models (Generator and Discriminators)
         # -----------------------------------------------------------------------
@@ -475,19 +499,9 @@ def main():
                 fid.update(to_u8(unit_comp), real=False)
                 fixed_fid = fid.compute().item()
 
-                if fixed_fid < best_fid:
-                    best_fid = fixed_fid
-                    tolerance = 5 # reset if improved
-                else:
-                    tolerance -= 1
-                    if tolerance <= 0:
-                        print(f"FID STOP: Early stopping at epoch {epoch+1}/{EPOCH_NUM}")
-                        logger.info(f"FID STOP: Early stopping at epoch {epoch+1}/{EPOCH_NUM}")
-                        early_stopping = True
-
             message = f"Epoch {epoch+1}: SSIM={fixed_ssim:.4f} LPIPS={fixed_lpips:.4f}"
             if fixed_fid is not None:
-                message += f", FID={fixed_fid:.2f}"
+                message += f", FID={fixed_fid:.2f}, DIF(scale)={dif_scale:.2f}"
             print(message)
             logger.info(message)
 

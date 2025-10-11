@@ -204,8 +204,6 @@ def lossMSL1(real, fake, mask):
         hole = masked_l1(fs, ors, ms)
         valid = masked_l1(fs, ors, 1.0 - ms)
         multi_loss += HOLE_LAMBDA * hole * frac_hole + VALID_LAMBDA * valid * frac_valid
-        #multi_loss += HOLE_LAMBDA * F.l1_loss(fs * ms, ors * ms) + \
-        #              VALID_LAMBDA * F.l1_loss(fs * (1.0 - ms), ors * (1.0 - ms))
     return multi_loss / len(SCALES)
 
 def sobel(x):

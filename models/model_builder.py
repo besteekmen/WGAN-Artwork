@@ -4,10 +4,9 @@ import torch
 from torch import optim
 from torch_ema import ExponentialMovingAverage
 
-from models.generator import Generator
 from models.aot_generator import AOTGenerator
 from models.discriminator import GlobalDiscriminator, LocalDiscriminator
-from models.weights_init import weights_init_normal, bias_init_gate
+from models.weights_init import weights_init_normal
 from utils.utils import get_device
 from config import *
 
@@ -122,3 +121,7 @@ def forward_pass(netG, image, mask_hole):
     fake = netG(image, mask_hole)
     composite = fake * mask_hole + image * (1.0 - mask_hole)
     return fake, composite
+
+def set_grads(module, requires: bool):
+    for param in module.parameters():
+        param.requires_grad_(requires)
