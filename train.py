@@ -111,6 +111,7 @@ def main():
         # Set lambda schedules
         adv_lambda = get_schedule(epoch, ADV_LAMBDA_SCHEDULE)
         perc_lambda = get_schedule(epoch, PERCEPTUAL_LAMBDA_SCHEDULE)
+        fm_lambda = get_schedule(epoch, FM_LAMBDA_SCHEDULE)
         style_lambda = get_schedule(epoch, STYLE_LAMBDA_SCHEDULE)
         edge_lambda = get_schedule(epoch, EDGE_LAMBDA_SCHEDULE)
         irr_ratio = get_schedule(epoch, IRR_RATIO_SCHEDULE)
@@ -216,8 +217,19 @@ def main():
                 # Adversarial loss (negated critic scores)
                 adv_global = -globalD(composite).mean()
                 patches = crop_local_patch(composite, mask_hole, offsets=(dy, dx))
-                adv_local = -localD(patches).mean()
+                fake_score, fake_feats = localD(patches, return_features=True)
+                adv_local = -fake_score.mean()
                 losses["adv"] = adv_global + adv_local
+
+                with torch.no_grad():
+                    real_patches = crop_local_patch(image, mask_hole, offsets=(dy, dx))
+                    _, real_feats = localD(real_patches, return_features=True)
+
+                fm = 0.0
+                for ff, rf in zip(real_feats, fake_feats):
+                    fm += (ff - rf).abs().mean()
+                fm = fm / len(fake_feats)
+                losses["fm"] = fm
 
                 # Pixel-wise L1 loss (multiscale, under amp)
                 losses["l1"] = lossMSL1(image, fake, mask_hole)
@@ -237,13 +249,14 @@ def main():
             losses["tv"] = tv
 
             # DEBUG only: Check for loss values to find the cause of NaN
-            all_terms = [losses["adv"], losses["l1"], losses["edge"], sl, pl, tv]
+            all_terms = [losses["adv"], losses["l1"], losses["edge"], losses["fm"], sl, pl, tv]
             with_nan = (not torch.isfinite(fake).all()) or (not all(torch.isfinite(x) for x in all_terms))
 
             if with_nan:
                 if i - nan_log_i >= 100:
                     message_skip = (f"[SKIP][epoch {epoch + 1}] iter {i} | "
                                     f"adv={float(losses['adv']) if torch.isfinite(losses['adv']) else 'NaN'} "
+                                    f"fm={float(losses['fm']) if torch.isfinite(losses['fm']) else 'NaN'} "
                                     f"l1={float(losses['l1']) if torch.isfinite(losses['l1']) else 'NaN'} "
                                     f"edge={float(losses['edge']) if torch.isfinite(losses['edge']) else 'NaN'} "
                                     f"style={float(losses['style']) if torch.isfinite(losses['style']) else 'NaN'} "
@@ -260,6 +273,7 @@ def main():
             # Final generator loss
             losses["totalG"] = (adv_lambda * losses["adv"] +
                                 L1_LAMBDA * losses["l1"] +
+                                fm_lambda * losses["fm"] +
                                 edge_lambda * losses["edge"] +
                                 style_lambda * losses["style"] +
                                 perc_lambda * losses["perceptual"] +
@@ -272,9 +286,10 @@ def main():
             num_batches += 1
 
             if i % SAVE_FREQ == 0:
-                raw = {k: float(losses[k]) for k in ["adv", "l1", "edge", "style", "perceptual", "tv"]}
+                raw = {k: float(losses[k]) for k in ["adv", "fm", "l1", "edge", "style", "perceptual", "tv"]}
                 weighted = {
                     "adv_w": adv_lambda * raw["adv"],
+                    "fm_w": fm_lambda * raw["fm"],
                     "l1_w": L1_LAMBDA * raw["l1"],
                     "edge_w": edge_lambda * raw["edge"],
                     "style_w": style_lambda * raw["style"],

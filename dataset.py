@@ -39,7 +39,7 @@ class CroppedImageDataset(Dataset):
             # to extend further transformations, add below lines
             transforms.RandomHorizontalFlip(p=0.5),
             transforms.ColorJitter(brightness=0.05, contrast=0.05, saturation=0.05),
-            transforms.ToTensor(),
+            transforms.ToTensor(), # to [0,1]
             # GANs perform better when inputs are in [-1,1] range instead of [0,1]
             transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
         ])

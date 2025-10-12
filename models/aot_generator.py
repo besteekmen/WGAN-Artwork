@@ -135,8 +135,8 @@ class AOTBlock(nn.Module):
 
         out = torch.cat([out0, out1, out2, out3], dim=1)
         out = self.fuse(out)
-        mask = torch.sigmoid(aot_layer_norm(self.gate(x)))
-        return x * (1 - mask) + out * mask
+        g = torch.sigmoid(aot_layer_norm(self.gate(x)))
+        return x * (1 - g) + out * g
 
 def AOTfilter(channel, kernel, norm=None):
     """Returns a frozen depthwise 3x3 convolution with the given kernel size."""

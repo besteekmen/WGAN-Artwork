@@ -4,7 +4,7 @@ VAL_SEED = 1234
 
 # --- Global helpers ---
 EPS = 1e-8 # Epsilon for safe mathematical operations
-TOL = 5 # Tolerance for early stopping
+TOL = 7 # Tolerance for early stopping
 SAVE_FREQ = 200
 CHECKPOINT_EVERY = 1 # Frequency of model saving
 
@@ -54,6 +54,12 @@ HOLE_LAMBDA = 4.0 # full weight for missing region, reduced from 6.0 to avoid la
 VALID_LAMBDA = 1.0 # smaller for known region (was 0.1)
 L1_LAMBDA = 1.0 # was 10.0 reconstruction loss weight
 TV_LAMBDA = 1e-4
+FM_LAMBDA_SCHEDULE = [ # was constant before as EDGE_LAMBDA = 0.05
+    (0, 0.0),
+    (5, 0.5),
+    (10, 1.0),
+    (20, 2.0)
+]
 EDGE_LAMBDA_SCHEDULE = [ # was constant before as EDGE_LAMBDA = 0.05
     (0, 0.005),
     (10, 0.015),
@@ -102,7 +108,7 @@ CROP_PATH = 'data/crops'
 SAMPLE_PATH = 'img'
 CROP_SIZE = 256
 CROP_COUNT = 1 # TODO: Random crop is used to crop only 1 patch!
-NUM_WORKERS = 4 # TODO: try 4
+NUM_WORKERS = 4
 LOG_PATH = 'logs'
 CHECK_PATH = 'checkpoints'
 TRAIN_LOG_FILE = 'train.log'

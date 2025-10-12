@@ -1,5 +1,7 @@
 import torch
 import torch.nn as nn
+from pyexpat import features
+
 from config import *
 
 # ---------------------
@@ -46,35 +48,51 @@ class LocalDiscriminator(nn.Module):
     # TODO: What about varying mask size? Does this help at all?
     def __init__(self):
         super(LocalDiscriminator, self).__init__()
-        self.main = nn.Sequential(
+        self.b1 = nn.Sequential(
             # 1st layer (Input: 3 x patch_size x patch_size, i.e. 3 x 128 x 128)
-            nn.Conv2d(IMAGE_CHANNELS, D_HIDDEN, kernel_size=4, stride=2, padding=1, bias=False), # (patch_size/2)x(patch_size/2)
+            nn.Conv2d(IMAGE_CHANNELS, D_HIDDEN, kernel_size=4, stride=2, padding=1, bias=False),
+            # (patch_size/2)x(patch_size/2)
             nn.LeakyReLU(0.2, inplace=True),
             # Input layer does not have a batch normalization layer connected to it,
             # because it could lead to sample oscillation and model instability.
-
-            # 2nd layer
-            nn.Conv2d(D_HIDDEN, D_HIDDEN * 2, kernel_size=4, stride=2, padding=1, bias=False), # (patch_size/4)x(patch_size/4)
-            #nn.BatchNorm2d(D_HIDDEN * 2),
-            nn.LeakyReLU(0.2, inplace=True),
-
-            # 3rd layer
-            nn.Conv2d(D_HIDDEN * 2, D_HIDDEN * 4, kernel_size=4, stride=2, padding=1, bias=False), # (patch_size/8)x(patch_size/8)
-            #nn.BatchNorm2d(D_HIDDEN * 4),
-            nn.LeakyReLU(0.2, inplace=True),
-
-            # 4th layer
-            nn.Conv2d(D_HIDDEN * 4, D_HIDDEN * 8, kernel_size=4, stride=2, padding=1, bias=False), # (patch_size/16)x(patch_size/16)
-            #nn.BatchNorm2d(D_HIDDEN * 8),
-            nn.LeakyReLU(0.2, inplace=True),
-
-            # Output layer
-            nn.Conv2d(D_HIDDEN * 8, 1, kernel_size=4, stride=1, padding=0, bias=False), # 5x5 (for patch_size=128)
-            # WGAN-GP: removed sigmoid as not using BCE, also BN layers are removed
-            #nn.Sigmoid()
         )
-    def forward(self, x):
-        # keep patch-level output (PatchGAN) pix2pix
-        #return self.main(x).view(-1, 1).squeeze(1)
-        out = self.main(x) # [B, 1, 5, 5]
-        return out.view(out.size(0), -1) # [B, num_patches]
+        self.b2 = nn.Sequential(
+            # 2nd layer
+            nn.Conv2d(D_HIDDEN, D_HIDDEN * 2, kernel_size=4, stride=2, padding=1, bias=False),
+            # (patch_size/4)x(patch_size/4)
+            # nn.BatchNorm2d(D_HIDDEN * 2),
+            nn.LeakyReLU(0.2, inplace=True),
+        )
+        self.b3 = nn.Sequential(
+            # 3rd layer
+            nn.Conv2d(D_HIDDEN * 2, D_HIDDEN * 4, kernel_size=4, stride=2, padding=1, bias=False),
+            # (patch_size/8)x(patch_size/8)
+            # nn.BatchNorm2d(D_HIDDEN * 4),
+            nn.LeakyReLU(0.2, inplace=True),
+        )
+        self.b4 = nn.Sequential(
+            # 4th layer
+            nn.Conv2d(D_HIDDEN * 4, D_HIDDEN * 8, kernel_size=4, stride=2, padding=1, bias=False),
+            # (patch_size/16)x(patch_size/16)
+            # nn.BatchNorm2d(D_HIDDEN * 8),
+            nn.LeakyReLU(0.2, inplace=True),
+        )
+        self.out = nn.Sequential(
+            # Output layer
+            nn.Conv2d(D_HIDDEN * 8, 1, kernel_size=4, stride=1, padding=0, bias=False),  # 5x5 (for patch_size=128)
+            # WGAN-GP: removed sigmoid as not using BCE, also BN layers are removed
+            # nn.Sigmoid()
+        )
+    def forward(self, x, return_features: bool = False):
+        f1 = self.b1(x)         # [B, D, H/2, W/2]
+        f2 = self.b2(f1)         # [B, 2D, H/4, W/4]
+        f3 = self.b3(f2)         # [B, 4D, H/8, W/8]
+        f4 = self.b4(f3)         # [B, 8D, H/16, W/16]
+        logits = self.out(f4)   # [B, 1, 5, 5] for 128x128
+        score = logits.view(logits.size(0), -1) # [B, num_patches]
+
+        if not return_features:
+            return score
+
+        feats = [torch.mean(f3, dim=(2,3)), torch.mean(f4, dim=(2,3))] # each [B, C]
+        return score, feats
