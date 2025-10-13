@@ -158,7 +158,7 @@ class DIFBlock(nn.Module):
         super().__init__()
         self.steps = steps
         # base parameters
-        self.tau = tau
+        self.tau = tau # step size
         self.alpha = alpha # gain for along-edge (tangent) curvature
         self.beta = beta # gain for across-edge (normal) curvature
         self.scale = 1.0

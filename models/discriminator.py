@@ -89,10 +89,10 @@ class LocalDiscriminator(nn.Module):
         f3 = self.b3(f2)         # [B, 4D, H/8, W/8]
         f4 = self.b4(f3)         # [B, 8D, H/16, W/16]
         logits = self.out(f4)   # [B, 1, 5, 5] for 128x128
-        score = logits.view(logits.size(0), -1) # [B, num_patches]
+        #score = logits.view(logits.size(0), -1) # [B, num_patches]
 
         if not return_features:
-            return score
+            return logits
 
         feats = [torch.mean(f3, dim=(2,3)), torch.mean(f4, dim=(2,3))] # each [B, C]
-        return score, feats
+        return logits, feats

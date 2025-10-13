@@ -2,6 +2,7 @@ import torch
 import torch.nn.parallel
 import torch.backends.cudnn as cudnn
 import torch.utils.data
+import torch.nn.functional as F
 from datetime import datetime
 from tqdm import tqdm
 from multiprocessing import freeze_support
@@ -182,11 +183,22 @@ def main():
             with half_precision():
                 real_patches = crop_local_patch(image, mask_hole, offsets=(dy, dx))
                 fake_patches = crop_local_patch(composite_detached, mask_hole, offsets=(dy, dx))
-                real_local = localD(real_patches)
-                fake_local = localD(fake_patches)
+                logits_real, f_real = localD(real_patches, return_features=True)
+                logits_fake, f_fake = localD(fake_patches, return_features=True)
+
+            with torch.no_grad():
+                mask_crop = crop_local_patch(mask_hole, mask_hole, offsets=(dy, dx))
+                mask_crop = mask_crop.to(dtype=logits_fake.dtype)
+                m_small = F.interpolate(mask_crop, size=logits_fake.shape[-2:], mode='bilinear', align_corners=False)
+                m_soft = F.avg_pool2d(m_small, kernel_size=3, stride=1, padding=1).clamp_(0,1)
+                t_real = torch.zeros_like(logits_real)
+            loss_localD = F.mse_loss(logits_fake, m_soft) + F.mse_loss(logits_real, t_real)
+
+                #real_local = localD(real_patches)
+                #fake_local = localD(fake_patches)
             # For stability, gradient penalty HAS to be float32! (no amp)
-            gp_local = gradient_penalty(localD, real_patches.float(), fake_patches.float(), device)
-            loss_localD = (fake_local.mean() - real_local.mean()) + GP_LAMBDA * gp_local
+            #gp_local = gradient_penalty(localD, real_patches.float(), fake_patches.float(), device)
+            #loss_localD = (fake_local.mean() - real_local.mean()) + GP_LAMBDA * gp_local
 
             # Use scaler, DO NOT detach before backward to keep gradients flow
             scaler_localD.scale(loss_localD).backward() # Scale loss
@@ -201,7 +213,8 @@ def main():
 
             # Free memory for discriminator step
             del composite_detached, real_global, fake_global, gp_global
-            del real_patches, fake_patches, real_local, fake_local, gp_local
+            del real_patches, fake_patches#, real_local, fake_local, gp_local
+            del logits_real, logits_fake, mask_crop, m_small, m_soft
 
             # -------------------------------------------------------------------
             # Step 2: Generator training
@@ -216,9 +229,13 @@ def main():
             with half_precision():
                 # Adversarial loss (negated critic scores)
                 adv_global = -globalD(composite).mean()
+
                 patches = crop_local_patch(composite, mask_hole, offsets=(dy, dx))
-                fake_score, fake_feats = localD(patches, return_features=True)
-                adv_local = -fake_score.mean()
+                logits_fake_g, f_fake_g = localD(patches, return_features=True)
+                adv_local = F.mse_loss(logits_fake_g, t_real)
+
+                #fake_score, fake_feats = localD(patches, return_features=True)
+                #adv_local = -fake_score.mean()
                 losses["adv"] = adv_global + adv_local
 
                 with torch.no_grad():
@@ -226,9 +243,9 @@ def main():
                     _, real_feats = localD(real_patches, return_features=True)
 
                 fm = 0.0
-                for ff, rf in zip(real_feats, fake_feats):
+                for ff, rf in zip(real_feats, f_fake_g):
                     fm += (ff - rf).abs().mean()
-                fm = fm / len(fake_feats)
+                fm = fm / len(f_fake)
                 losses["fm"] = fm
 
                 # Pixel-wise L1 loss (multiscale, under amp)
