@@ -116,11 +116,3 @@ LOAD_MODEL = False
 
 # --- CUDA usage ---
 CUDA = True # set 'False' to train on CPU
-
-
-
-
-
-
-
-

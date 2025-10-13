@@ -241,3 +241,9 @@ def lossTV(x, mask, size=TV_RING):
     tvy = (dy.abs() * ringy).sum()
     denom = (ringx.sum() + ringy.sum()).clamp_min(1.0)
     return (tvx + tvy) / denom
+
+def lossFM(real_feats, fake_feats):
+    fm = 0.0
+    for ff, rf in zip(real_feats, fake_feats):
+        fm += (ff - rf).abs().mean()
+    return fm / len(fake_feats)
