@@ -102,7 +102,7 @@ TV_RING = 2
 
 # --- Datasets and paths ---
 OUT_PATH = 'out'
-SOURCE_PATH = 'data/wikiart' # Root of dataset
+SOURCE_PATH = 'data/original' # Root of dataset
 DATA_PATH = 'data'
 CROP_PATH = 'data/crops'
 SAMPLE_PATH = 'img'

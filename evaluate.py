@@ -93,10 +93,10 @@ def evaluate(model_path, out_dir="eval_outputs",
             B = image.size(0)
 
             # Option 1: Use below to mask with pre-downloaded masks
-            mask_known = use_masks(B, device) # [B, 1, 256, 256]
+            #mask_known = use_masks(B, device) # [B, 1, 256, 256]
 
             # Option 2: Use below to generate random masks
-            #mask_known = randomize_masks(mask.to(device), irr_ratio=irr_ratio)
+            mask_known = randomize_masks(mask.to(device), irr_ratio=irr_ratio)
 
             mask_hole = (1.0 - mask_known).float()
 
