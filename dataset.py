@@ -31,7 +31,8 @@ class CroppedImageDataset(Dataset):
     Returns:
         Dataset: Cropped dataset of cropped images and masks (crop: [-1,1], mask: [0,1]).
     """
-    def __init__(self, crops_dir, transform=None, split='train'):
+    def __init__(self, crops_dir, transform=None, split='train',
+                 mask_dir=None, ):
         self.crops_dir = crops_dir
         self.split = split.lower()
         assert self.split in ['train', 'val', 'test'], f"Split {split} not recognized.!"

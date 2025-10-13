@@ -1,4 +1,8 @@
 import os
+import glob
+import random
+import numpy as np
+from PIL import Image
 from tqdm import tqdm
 
 import torch
@@ -27,6 +31,28 @@ def load_state(netG, path, device, strict=False):
         raise RuntimeError(f"Missing keys: {missing}")
     if unexpected:
         raise RuntimeError(f"Unexpected keys: {unexpected}")
+
+def get_masks():
+    files = []
+    for ext in ["*.png", "*.jpg", "*.jpeg"]:
+        files += glob.glob(os.path.join(os.path.join(DATA_PATH, "mask"), ext))
+    if not files:
+        raise RuntimeError(f"No masks found in {DATA_PATH}")
+    return files
+
+def use_masks(B, device):
+    """Load one random file per sample."""
+    files = get_masks()
+    out = torch.empty(B, 1, 256, 256, dtype=torch.float32)
+    for b in range(B):
+        f = random.choice(files)
+        m = Image.open(f).convert("L") # force grayscale
+        m = m.resize((256, 256), resample=Image.NEAREST)
+        m = np.array(m, dtype=np.uint8)
+        hole = (m>127).astype(np.float32)
+        known = 1.0 - hole
+        out[b, 0] = torch.from_numpy(known)
+    return out.to(device)
 
 def evaluate(model_path, out_dir="eval_outputs",
              irr_ratio=0.3, batch_size=BATCH_SIZE,
@@ -64,7 +90,14 @@ def evaluate(model_path, out_dir="eval_outputs",
     with torch.inference_mode():
         for image, mask in tqdm(test_loader, desc="Testing", ncols=100):
             image = image.to(device, non_blocking=True)
-            mask_known = randomize_masks(mask.to(device), irr_ratio=irr_ratio)
+            B = image.size(0)
+
+            # Option 1: Use below to mask with pre-downloaded masks
+            mask_known = use_masks(B, device) # [B, 1, 256, 256]
+
+            # Option 2: Use below to generate random masks
+            #mask_known = randomize_masks(mask.to(device), irr_ratio=irr_ratio)
+
             mask_hole = (1.0 - mask_known).float()
 
             fake = netG(image, mask_hole)
