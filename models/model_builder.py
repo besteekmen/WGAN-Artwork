@@ -14,7 +14,7 @@ def init_nets(device=None):
     """Initialize the networks on the current device."""
     if device is None:
         device = get_device()
-    #netG = Generator().to(device)
+
     netG = AOTGenerator().to(device)
     globalD = GlobalDiscriminator().to(device)
     localD = LocalDiscriminator().to(device)
@@ -28,7 +28,9 @@ def init_optimizers(netG, globalD, localD):
     return optimG, optimGD, optimLD
 
 def init_ema(netG, decay=0.999, device=None):
-    """Initialize the Exponential Moving Average."""
+    """Initialize the Exponential Moving Average.
+    Will average the weights to produce a stable end file for testing!
+    """
     if device is None:
         device = get_device()
     ema = ExponentialMovingAverage(netG.parameters(), decay=decay)
@@ -36,6 +38,9 @@ def init_ema(netG, decay=0.999, device=None):
     return ema
 
 def save_ema(netG, ema, check_path):
+    """Save the Exponential Moving Average weights to a file.
+    TODO: Filename could be parsed later.
+    """
     ema.store()
     ema.copy_to(netG.parameters())
     torch.save(netG.state_dict(),
@@ -58,9 +63,8 @@ def setup_model(netG, globalD, localD, optimG, optimGD, optimLD,
 
 def init_model(netG, globalD, localD, optimG, optimGD, optimLD):
     """Initialize the model with new weights."""
-    #netG.apply(weights_init_normal)
-    #netG.upsample_init()  # used to avoid initial patchy results
-    #netG.apply(bias_init_gate) # start gates open for better detail flow
+    #netG.apply(weights_init_normal) --> old generator
+    # TODO: Move AOT initialization here only after testing.
     # print(netG) # DEBUG only: causes repetitive printing
     globalD.apply(weights_init_normal)
     localD.apply(weights_init_normal)
@@ -78,7 +82,7 @@ def load_model(netG, globalD, localD, optimG, optimGD, optimLD, check_path, load
     else:  # for older checkpoints without epoch number
         ep = re.search(r'checkpoint(\d+)\.pth\.tar$', os.path.basename(checkpoint_file))
         start_epoch = int(ep.group(1)) if ep is not None else 0
-    # if a checkpoint loaded and learning rate changed, use below
+    # if a checkpoint loaded and learning rate changed, uncomment below
     # for pg in optimGD.param_groups: pg['lr'] = LR_D
     # for pg in optimLD.param_groups: pg['lr'] = LR_D
     # for pg in optimG.param_groups: pg['lr'] = LR_G
@@ -123,5 +127,6 @@ def forward_pass(netG, image, mask_hole):
     return fake, composite
 
 def set_grads(module, requires: bool):
+    """Set gradients for modules."""
     for param in module.parameters():
         param.requires_grad_(requires)

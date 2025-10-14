@@ -18,10 +18,11 @@ class CroppedImageDataset(Dataset):
     """Dataset of previously cropped images.
 
     Data is obtained from: https://github.com/cs-chan/ArtGAN/tree/master/WikiArt%20Dataset
-
+    This class assumes that the images have already been cropped and splitted.
+    If data is not ready yet, go to scripts and prepare data!
     A Pytorch dataset to scan pre-extracted cropped images,
     and return the original crop with a (randomly) masked version and the mask
-    Attributes: or args:? add returns:
+    Attributes: or args:?
         crops_dir (str): Directory path containing the pre-extracted crops.
         transform (callable, optional): A function/transform that takes in
         a PIL image and returns a transformed version.
@@ -31,8 +32,8 @@ class CroppedImageDataset(Dataset):
     Returns:
         Dataset: Cropped dataset of cropped images and masks (crop: [-1,1], mask: [0,1]).
     """
-    def __init__(self, crops_dir, transform=None, split='train',
-                 mask_dir=None, ):
+    def __init__(self, crops_dir, transform=None, split='train'):
+        # TODO: could add an argument for existing masks later -> mask_dir
         self.crops_dir = crops_dir
         self.split = split.lower()
         assert self.split in ['train', 'val', 'test'], f"Split {split} not recognized.!"
@@ -107,6 +108,7 @@ def generate_square_mask(height, width, rand=None, p_size=0.6,
     mask = torch.ones(1, height, width, dtype=torch.float32)  # [1, H, W]
     mask[:, top:top + block_size, left:left + block_size] = 0  # (1 = known, 0 = hole)
 
+    # Uncomment below to rotate square masks
     #if rand.random() < p_rotate:
     #    angle = rand.uniform(-max_angle, max_angle)
     #    mask = rotate(
@@ -122,7 +124,8 @@ def generate_irregular_mask(height, width, brush_width=(7, 25),
                             min_times=6, max_times=10,
                             rand=None):
     """Create a random size and random location irregular mask.
-    Src: LaMa Image Inpainting WACV 2022 (https://github.com/advimman/lama)"""
+    Example: LaMa Image Inpainting WACV 2022 (https://github.com/advimman/lama)
+    TODO: Move constants to config later."""
     rand = rand or random
     mask = np.ones((height, width), np.float32)  # [H, W] need to be numpy for opencv
     times = rand.randint(min_times, max_times)
@@ -176,7 +179,7 @@ def make_dataloader(dataset, set_path, batch_size, num_workers, cuda, shuffle=Tr
             shuffle=shuffle,
             num_workers=0
         )
-    # Add a pin_memory=True argument when calling torch.utils.data.DataLoader()
+    # pin_memory=True for when calling torch.utils.data.DataLoader()
     # on small datasets, to make sure data is stored at fixed GPU memory addresses
     # and thus increase the data loading speed during training.
     return dataloader
@@ -204,7 +207,9 @@ def prepare_batch(batch, device, irr_ratio: float | None = None,
     return image, mask_hole
 
 def random_select(source_dir, count, size=CROP_SIZE, seed=SEED):
-    """Select given count of images from a source directory randomly."""
+    """Select given count of images from a source directory randomly.
+    Necessary for randomization on dataset preparation.
+    """
     rand = random.Random(seed)
     image_ext = {'.jpg', '.jpeg', '.png'}
     base = os.path.basename(source_dir)
@@ -221,7 +226,7 @@ def random_select(source_dir, count, size=CROP_SIZE, seed=SEED):
                 img = ImageOps.exif_transpose(img)
                 width, height = img.size
 
-            # Skip small images
+            # Skip small images, one dim must be at least 256, else all fails!
             if width < size or height < size:
                 print(f"Skipping small image ({width}x{height}): ({image.path}).")
             else:
@@ -304,6 +309,9 @@ def split_data(images, target_dir,
 def prepare_data(source_dir, target_dir,
                  cat_counts, crop_size=CROP_SIZE, crops_per_image=3,
                  ratios=(0.8, 0.1, 0.1), seed=SEED):
+    """Prepares train, val and test sets from a raw dataset.
+    Uses all previous calls to check size, crop and randomize.
+    """
     source_root = source_dir
     for split in ("train", "val", "test"):
         clear_folder(os.path.join(target_dir, split))
@@ -321,7 +329,8 @@ def prepare_data(source_dir, target_dir,
 def preextract_randomcrops(source_dir, target_dir, crop_size=CROP_SIZE, crops_per_image=3):
     """
     Extract a specified number of fixed size crops (all located randomly) from each image,
-    then save them all as separate images.
+    then save them all as separate images. Currently only tried with 1 crop.
+    Needs to be checked before trying more crops.
 
     Args:
         source_dir (str): Directory path containing the images to crop.

@@ -1,10 +1,10 @@
 import os
 
-from tqdm import tqdm
 from config import SOURCE_PATH, DATA_PATH, CROP_SIZE, CROP_COUNT, SEED
 from dataset import prepare_data
 
 STYLE_COUNTS = {
+    # TODO: Turn this dict into a file to input!
     # Chaotic marks and textured abstraction
     "Abstract_Expressionism":2300,
     "Pointillism": 512,
@@ -48,7 +48,7 @@ if __name__ == "__main__":
     target_dir = '../'+DATA_PATH
     crop_size = CROP_SIZE
     crop_count = CROP_COUNT
-    ratios = (0.8, 0.1, 0.1)
+    ratios = (0.8, 0.1, 0.1)  # Split ratio for train/val/test sets
     seed = SEED
 
     for split in ('train', 'val', 'test'):

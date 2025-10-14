@@ -13,38 +13,38 @@ class GlobalDiscriminator(nn.Module):
             # 1st layer (Input: 3 x 256 x 256)
             nn.Conv2d(IMAGE_CHANNELS, D_HIDDEN, kernel_size=4, stride=2, padding=1, bias=False), # 128x128
             nn.LeakyReLU(0.2, inplace=True),
-            # Input layer does not have a batch normalization layer connected to it,
-            # because it could lead to sample oscillation and model instability.
+            # No normalization here anyways, to avoid instability!
 
             # 2nd layer
             nn.Conv2d(D_HIDDEN, D_HIDDEN * 2, kernel_size=4, stride=2, padding=1, bias=False), # 64x64
-            #nn.BatchNorm2d(D_HIDDEN * 2),
             nn.LeakyReLU(0.2, inplace=True),
 
             # 3rd layer
             nn.Conv2d(D_HIDDEN * 2, D_HIDDEN * 4, kernel_size=4, stride=2, padding=1, bias=False), # 32x32
-            #nn.BatchNorm2d(D_HIDDEN * 4),
             nn.LeakyReLU(0.2, inplace=True),
 
             # 4th layer
             nn.Conv2d(D_HIDDEN * 4, D_HIDDEN * 8, kernel_size=4, stride=2, padding=1, bias=False), # 16x16
-            #nn.BatchNorm2d(D_HIDDEN * 8),
             nn.LeakyReLU(0.2, inplace=True),
 
             # Output layer
             nn.Conv2d(D_HIDDEN * 8, 1, kernel_size=4, stride=1, padding=0, bias=False), # 13x13
-            # WGAN-GP: removed sigmoid as not using BCE, also normalizations are removed
+            # WGAN-GP: removed sigmoid as not using BCE, also normalizations are removed (was BN)
             # nn.Sigmoid()
         )
     def forward(self, x):
+        """Global discriminator.
+        Gets the full size 256x256 image (original and fake both),
+        and returns a single averaged critic score for each. Unlike Vanilla GAN,
+        this is not True, False but a critic score that could also be negative.
+        """
         # view(-1) and view(-1, 1).squeeze(1) are the same, but make sure the dimensions are controlled!
         return self.main(x).mean(dim=(2,3)).view(-1, 1).squeeze(1) # [B, 1, 13, 13] -> [B] with averaged
 
-# ---------------------
+# --------------------
 # Local Discriminator: judges the inpainted mask patch (i.e. 128x128 or smaller)
-# ---------------------
+# --------------------
 class LocalDiscriminator(nn.Module):
-    # TODO: What about varying mask size? Does this help at all?
     def __init__(self):
         super(LocalDiscriminator, self).__init__()
         self.b1 = nn.Sequential(
@@ -83,6 +83,11 @@ class LocalDiscriminator(nn.Module):
             # nn.Sigmoid()
         )
     def forward(self, x, return_features: bool = False):
+        """Local discriminator.
+        Gets a cropped patch from the image (both original and fake),
+        and returns either only a score set (for patches),
+        or also intermediate feature maps for feature matching.
+        """
         f1 = self.b1(x)         # [B, D, H/2, W/2]
         f2 = self.b2(f1)         # [B, 2D, H/4, W/4]
         f3 = self.b3(f2)         # [B, 4D, H/8, W/8]

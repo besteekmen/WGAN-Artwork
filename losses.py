@@ -21,6 +21,7 @@ def init_losses(device=get_device()):
 def init_metrics(device=get_device()):
     """Initialize the metrics for model networks."""
     # no need to normalize as unit ones are fed!
+    # TODO: check more artwork oriented metrics
     ssim = StructuralSimilarityIndexMeasure(data_range=1.0).to(device)
     lpips = LearnedPerceptualImagePatchSimilarity(net_type='vgg').to(device)
     fid = FrechetInceptionDistance(feature=2048).to(device)
@@ -116,7 +117,7 @@ class VGG16PerceptualLoss(nn.Module):
         self.criterion = nn.MSELoss()
 
     def forward(self, real, fake):
-        real = (real + 1.0) / 2.0
+        real = (real + 1.0) / 2.0 # the same, call functions
         fake = (fake + 1.0) / 2.0
 
         real = (real - self.mean) / self.std
@@ -143,7 +144,7 @@ class VGG16PerceptualLoss(nn.Module):
 
 def gradient_penalty(critic, real, fake, device):
     """Return gradient penalty for a given gradient
-    Src: https://medium.com/@krushnakr9/gans-wasserstein-gan-with-gradient-penalty-wgan-gp-b8da816cb2d2"""
+    Topic: https://medium.com/@krushnakr9/gans-wasserstein-gan-with-gradient-penalty-wgan-gp-b8da816cb2d2"""
     B, C, H, W = real.shape
     alpha = torch.rand(B, 1, 1, 1, device=device)
     interpolated = alpha * real + ((1 - alpha) * fake)
@@ -185,6 +186,9 @@ def lossMSL1(real, fake, mask):
     Weighted l1 loss: https://arxiv.org/pdf/2401.03395
     Also weighted: https://arxiv.org/pdf/1801.07892
 
+    Would be better to use intermediate feature maps,
+    but gets too slow! So only downscaled images considered.
+
     Arguments:
         real: [B, 3, H, W] values in [-1, 1]
         fake: [B, 3, H, W] values in [-1, 1]
@@ -222,6 +226,7 @@ def sobel(x):
     return torch.sqrt(grad_x ** 2 + grad_y ** 2 + EPS) # added epsilon to avoid NaN grads
 
 def lossEdge(real, fake):
+    """Edge loss to penalize edge clearing."""
     return F.l1_loss(sobel(real), sobel(fake)) # use functional l1, not class one
 
 def lossTV(x, mask, size=TV_RING):
@@ -243,6 +248,10 @@ def lossTV(x, mask, size=TV_RING):
     return (tvx + tvy) / denom
 
 def lossFM(real_feats, fake_feats):
+    """A very simple feature matching.
+    Gets intermediate features from local discriminator,
+    and calculates mae.
+    """
     fm = 0.0
     for ff, rf in zip(real_feats, fake_feats):
         fm += (ff - rf).abs().mean()

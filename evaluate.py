@@ -19,6 +19,7 @@ from torchmetrics.image.fid import FrechetInceptionDistance
 from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
 
 def load_state(netG, path, device, strict=False):
+    """Load state of a checkpoint."""
     checkpoint = torch.load(path, map_location=device)
     if isinstance(checkpoint, dict):
         for key in ["state_dict", "ema", "generator", "netG", "G", "model"]:
@@ -33,6 +34,7 @@ def load_state(netG, path, device, strict=False):
         raise RuntimeError(f"Unexpected keys: {unexpected}")
 
 def get_masks():
+    """Gets existing masks on-fly as a list from the 'mask' folder."""
     files = []
     for ext in ["*.png", "*.jpg", "*.jpeg"]:
         files += glob.glob(os.path.join(os.path.join(DATA_PATH, "mask"), ext))
@@ -57,6 +59,7 @@ def use_masks(B, device):
 def evaluate(model_path, out_dir="eval_outputs",
              irr_ratio=0.3, batch_size=BATCH_SIZE,
              save_images=True):
+    """Evaluate the model with pretrained weights."""
     print_device()
     set_seed(SEED)
     device = get_device()
@@ -65,12 +68,11 @@ def evaluate(model_path, out_dir="eval_outputs",
     netG = AOTGenerator(in_channels=4).to(device).eval()
     load_state(netG, model_path, device)
 
-    # Load validation dataset
+    # Load test set
     transform = transforms.Compose([
         transforms.ToTensor(),
         transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
     ])
-
     test_set = CroppedImageDataset(crops_dir=os.path.join(DATA_PATH, 'test'), transform=transform, split='test')
     test_loader = make_dataloader(test_set, 'test', batch_size, num_workers=NUM_WORKERS, cuda=is_cuda(), shuffle=False)
 
@@ -92,7 +94,7 @@ def evaluate(model_path, out_dir="eval_outputs",
             image = image.to(device, non_blocking=True)
             B = image.size(0)
 
-            # Option 1: Use below to mask with pre-downloaded masks
+            # Option 1: Use below to mask with pre-downloaded masks located in 'mask'
             #mask_known = use_masks(B, device) # [B, 1, 256, 256]
 
             # Option 2: Use below to generate random masks

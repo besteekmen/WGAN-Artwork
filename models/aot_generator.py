@@ -2,21 +2,23 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from utils.vision_utils import get_ring
 from models.weights_init import weights_init_normal
 from config import *
-from utils.vision_utils import get_ring
 
-
+# --------------
+# AOT Generator: switched from coarse to fine!
+# --------------
 class AOTGenerator(nn.Module):
     def __init__(self, in_channels=4):
         super(AOTGenerator, self).__init__()
         self.encoder = nn.Sequential(
             nn.ReflectionPad2d(3),
-            # 1st layer
-            nn.Conv2d(in_channels, G_HIDDEN, 7),
+            # 1st layer (Input: 3 x 262 x 262 -> 256 + 6 by padding)
+            nn.Conv2d(in_channels, G_HIDDEN, 7), # [B, 64, 256, 256]
             nn.ReLU(inplace=True),
-            # inplace ReLU is used to prevent 'Out of memory', do not use in case of an error
-            # Source: https://discuss.pytorch.org/t/guidelines-for-when-and-why-one-should-set-inplace-true/50923
+            # inplace ReLU is used to prevent 'Out of memory'
+            # Why?: https://discuss.pytorch.org/t/guidelines-for-when-and-why-one-should-set-inplace-true/50923
             # 2nd layer
             nn.Conv2d(G_HIDDEN, G_HIDDEN * 2, 4, stride=2, padding=1),  # [B, 128, 128, 128]
             nn.ReLU(inplace=True),
@@ -26,7 +28,7 @@ class AOTGenerator(nn.Module):
         )
 
         self.aot1 = AOTBlock(G_HIDDEN * 4)
-        #self.aot2 = AOTBlock(G_HIDDEN * 4)
+        #self.aot2 = AOTBlock(G_HIDDEN * 4) # If you use it, also edit forward function!
         self.aot3 = AOTBlock(G_HIDDEN * 4)
         self.aot4 = AOTBlock(G_HIDDEN * 4)
 
@@ -39,17 +41,6 @@ class AOTGenerator(nn.Module):
         self.blur_up1 = AOTfilter(G_HIDDEN * 2, [[1, 2, 1], [2, 4, 2], [1, 2, 1]], norm=16.0)
         self.blur_up2 = AOTfilter(G_HIDDEN, [[1, 2, 1], [2, 4, 2], [1, 2, 1]], norm=16.0)
 
-        #self.decoder = nn.Sequential(
-            # 7th layer
-        #    nn.ConvTranspose2d(G_HIDDEN * 4, G_HIDDEN * 2, 4, stride=2, padding=1, bias=True),
-        #    nn.ReLU(inplace=True),
-            # 8th layer
-        #    nn.ConvTranspose2d(G_HIDDEN * 2, G_HIDDEN, 4, stride=2, padding=1, bias=True),
-        #    nn.ReLU(inplace=True),
-            # 9th layer (to RGB)
-        #    nn.Conv2d(G_HIDDEN, 3, 3, padding=1)
-        #)
-
         self.dif = DIFBlock(G_HIDDEN * 4, detach_orientation=True)
         self.dif.reset()
 
@@ -58,20 +49,25 @@ class AOTGenerator(nn.Module):
                 m.reset()
 
     def forward(self, x, mask):
-        """Gets an image and a mask to forward.
+        """Gets an image and a mask to forward. Original image is fed,
+        and the masked image is generated inside. (but feeding only masked!)
+
         Arguments:
-            image: [B, 3, H, W] values in [-1, 1]
+            x: [B, 3, H, W] values in [-1, 1]
             mask: [B, 1, H, W] values in [0, 1], (1=hole, 0=known)
         """
         masked_input = x * (1.0 - mask)
+        # TODO: Update later and do masking outside, it is confusing! :P
+
         x = torch.cat((masked_input, mask), dim=1)
         x = self.encoder(x)
         x = self.aot1(x)
-        #x = self.aot2(x)
+        #x = self.aot2(x) # epoch time increases! But could be added later.
         x = self.dif(x, mask)
         x = self.aot3(x)
         x = self.aot4(x)
 
+        # decoder part
         x = self.deconv1(x)
         x = self.blur_up1(x)
         x = F.relu(x, inplace=True)
@@ -79,13 +75,12 @@ class AOTGenerator(nn.Module):
         x = self.blur_up2(x)
         x = F.relu(x, inplace=True)
         x = self.to_rgb(x)
-
-        #x = self.decoder(x)
         return torch.tanh(x)
 
 def aot_layer_norm(features):
+    """Normalizes AOT block after the gating and before the sigmoid."""
     mean = features.mean((2, 3), keepdim=True)
-    std = features.std((2, 3), keepdim=True) + 1e-9
+    std = features.std((2, 3), keepdim=True) + 1e-9 # Try global eps here.
     # return 3.0 * (features - mean) / std # lower gain
     features = 2 * (features - mean) / std - 1
     features = 5 * features
@@ -118,10 +113,22 @@ class AOTBlock(nn.Module):
         self.fuse = nn.Sequential(nn.ReflectionPad2d(1), nn.Conv2d(dim, dim, 3, padding=0, dilation=1))
         self.gate = nn.Sequential(nn.ReflectionPad2d(1), nn.Conv2d(dim, dim, 3, padding=0, dilation=1))
 
-        # learnable branch weights
+        # learnable branch weights, lets adaptable contribution of different receptive fields
         self.alpha = nn.Parameter(torch.zeros(1, 4, 1, 1))
 
     def forward(self, x):
+        """Multiple receptive field convolutions for AOT generator.
+        Gets the feature map, forwards it through 4 different dilation branches,
+        scale the outputs with a learnable parameter (how much each detailedness will contribute to proposal),
+        concatenates each C_bottleneck/4 scaled output and fuses them to C_bottleneck channel,
+        passes through a gate to decide where the proposals be applied (per pixel),
+        then normalizes and applies sigmoid.
+        The output is like masking with residual, which applies the changes only at
+        decided places
+
+        Arguments:
+            x: [B, G_HIDDEN * 4, H/4, W/4] feature maps
+        """
         out0 = self.block0(x)
         out1 = self.block1(x)
         out2 = self.block2(x)
@@ -201,6 +208,18 @@ class DIFBlock(nn.Module):
         return F.interpolate(mask.float(), size=(H, W), mode='nearest').clamp_(0, 1)
 
     def forward(self, x, mask=None):
+        """Anisotropic explicit diffusion step.
+        Implemented similar to CED, but with less controllable params for ease.
+        Performs a single step (could be increased but better not!) diffusion
+        anisotropically, so strong along adges and weak across edges. Gets the
+        bottleneck feature map and full size mask, downscles mask to feature dims,
+        then performs diffusion using the edge orientation from known area,
+        and only to a thin ring to not over diffuse inside mask.
+
+        Arguments:
+            x: [B, G_HIDDEN * 4, H/4, W/4] feature maps
+            mask: [B, 1, H, W] values in [0, 1], (1=hole, 0=known)
+        """
         B, C, H, W = x.shape
         band = self._down_mask(mask, H, W) if mask is not None else torch.zeros(B,1,H,W, device=x.device, dtype=x.dtype)
         band_soft = F.avg_pool2d(band, kernel_size=5, stride=1, padding=2)
@@ -221,7 +240,7 @@ class DIFBlock(nn.Module):
             # (-vy, vx) -> tangent to edge
             vx, vy = mean_x / magnitude, mean_y / magnitude
 
-            # smooth and renormalize orientation
+            # smooth (to get rid of noise) and renormalize orientation
             vx = F.avg_pool2d(vx, kernel_size=3, stride=1, padding=1)
             vy = F.avg_pool2d(vy, kernel_size=3, stride=1, padding=1)
             den = (vx*vx + vy*vy).sqrt().clamp_min(eps)
@@ -233,11 +252,13 @@ class DIFBlock(nn.Module):
                 vy = vy.detach()
 
             c_par = torch.sigmoid(4.0 * magnitude) # ~1 at strong edges
-            c_perp = 0.25 * (1.0 - c_par)
+            c_perp = 0.25 * (1.0 - c_par) # ~0 at strong edges
 
-            # local CFL safety scaling for explicit step, q is risk score!
+            # local CFL safety scaling for explicit step!
+            # q risk score scales diffusion step down near strong edges
+            # but does not for flat areas.
             q = (self.alpha * c_par).abs() + (self.beta * c_perp).abs()
-            # 1/3 so apprx 0.33 for a 3x3 stencil
+            # 1/3 so apprx 0.33 for a 3x3 stencil, additional safety limit
             tau_eff = (self.tau * self.scale) * torch.clamp(0.33 / (q + eps), max=1.0)
 
         x_new = x
@@ -250,12 +271,13 @@ class DIFBlock(nn.Module):
             vyvy = vy * vy
             vxvy = vx * vy
 
+            # hessian calculations to get curvature
             d2n = vxvx * dxx + 2 * vxvy * dxy + vyvy * dyy # curvature along normal
             d2t = vyvy * dxx - 2 * vxvy * dxy + vxvx * dyy # curvature along tangent
             step = tau_eff * (
                 self.alpha * c_par * d2t + self.beta * c_perp * d2n
             )
-            step = step * gate
+            step = step * gate # ring gating
             step = step.clamp(-0.04, 0.04)
             x_new = x_new + step
         return x_new

@@ -35,7 +35,7 @@ def main():
     set_seed(SEED)
     device = get_device()
 
-    # CUDNN setups
+    # CUDNN setups (move to a func later)
     cudnn.benchmark = True # set False if strange OOM (Out of memory) occurs
     # cudnn.deterministic = True # for exact reproducibility, disable benchmark
     torch.backends.cuda.matmul.allow_tf32 = True
@@ -47,7 +47,8 @@ def main():
     ema = init_ema(netG, device=device)
     start_epoch = setup_model(netG, globalD, localD,
                               optimG, optimGD, optimLD, check_path, ema, device)
-    # To load a pretrained model, add file_name as parameter to setup_model
+    # To load a pretrained model (to continue training), add file_name as parameter to setup_model
+    # Not necessary for testing, only training!
 
     # Init losses and quality metrics
     lossStyle, lossPerceptual = init_losses()
