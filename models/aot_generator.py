@@ -235,7 +235,7 @@ class DIFBlock(nn.Module):
             c_par = torch.sigmoid(4.0 * magnitude) # ~1 at strong edges
             c_perp = 0.25 * (1.0 - c_par)
 
-            # local CFL safety scaling for explicit step
+            # local CFL safety scaling for explicit step, q is risk score!
             q = (self.alpha * c_par).abs() + (self.beta * c_perp).abs()
             # 1/3 so apprx 0.33 for a 3x3 stencil
             tau_eff = (self.tau * self.scale) * torch.clamp(0.33 / (q + eps), max=1.0)
