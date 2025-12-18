@@ -160,14 +160,20 @@ def AOTfilter(channel, kernel, norm=None):
     return nn.Sequential(pad, conv)
 
 class DIFBlock(nn.Module):
-    def __init__(self, dim, steps=1, tau=0.15, alpha=0.9, beta=0.10,
+    def __init__(self, dim, steps=1, tau=0.60, alpha=0.9, beta=0.10,
+                 kappa=24.0, perp_scale=0.25, cfl_cap=0.33, step_clip=0.04,
                  detach_orientation=False):
+        # tau=0.60 rather than 0.15, kappa=32 rather than 4 due to h scaling but 24 is safer
         super().__init__()
         self.steps = steps
         # base parameters
         self.tau = tau # step size
         self.alpha = alpha # gain for along-edge (tangent) curvature
         self.beta = beta # gain for across-edge (normal) curvature
+        self.kappa = kappa
+        self.perp_scale = perp_scale
+        self.cfl_cap = cfl_cap
+        self.step_clip = step_clip
         self.scale = 1.0
         self.detach_orientation = detach_orientation
 
@@ -195,13 +201,31 @@ class DIFBlock(nn.Module):
             w = torch.tensor(k, device=device, dtype=dtype).view(1, 1, 3, 3).expand(C, 1, 3, 3)
             conv.weight.copy_(w)
 
-        _load(self.blur, [[1/16, 2/16, 1/16], [2/16, 4/16, 2/16], [1/16, 2/16, 1/16]])
-        _load(self.gx, [[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]])
-        _load(self.gy, [[-1, -2, -1], [0, 0, 0], [-1, 0, 1]])
+        # spacing on feature grid (assuming h=1)
+        h = 1.0
+        inv_8h = 1.0 / (8.0 * h)
+        inv_4h2 = 1.0 / (4.0 * h * h)
 
-        _load(self.dxx, [[1, -2, 1], [2, -4, 2], [1, -2, 1]])
-        _load(self.dyy, [[1, 2, 1], [-2, -4, -2], [1, 2, 1]])
-        _load(self.dxy, [[1, 0, -1], [0, 0, 0], [-1, 0, 1]])
+        _load(self.blur, [[1/16, 2/16, 1/16], [2/16, 4/16, 2/16], [1/16, 2/16, 1/16]])
+
+        # scale by 1/8h
+        _load(self.gx, [[-1*inv_8h, 0, 1*inv_8h],
+                        [-2*inv_8h, 0, 2*inv_8h],
+                        [-1*inv_8h, 0, 1*inv_8h]])
+        _load(self.gy, [[-1*inv_8h, -2*inv_8h, -1*inv_8h],
+                        [0, 0, 0],
+                        [1*inv_8h, 2*inv_8h, 1*inv_8h]])
+
+        # scale by 1/4h^2
+        _load(self.dxx, [[1*inv_4h2, -2*inv_4h2, 1*inv_4h2],
+                         [2*inv_4h2, -4*inv_4h2, 2*inv_4h2],
+                         [1*inv_4h2, -2*inv_4h2, 1*inv_4h2]])
+        _load(self.dyy, [[1*inv_4h2, 2*inv_4h2, 1*inv_4h2],
+                         [-2*inv_4h2, -4*inv_4h2, -2*inv_4h2],
+                         [1*inv_4h2, 2*inv_4h2, 1*inv_4h2]])
+        _load(self.dxy, [[1*inv_4h2, 0, -1*inv_4h2],
+                         [0, 0, 0],
+                         [-1*inv_4h2, 0, 1*inv_4h2]])
 
     def _down_mask(self, mask, H, W):
         """Downscale mask to feature dimensions."""
@@ -228,38 +252,50 @@ class DIFBlock(nn.Module):
 
         with torch.no_grad():
             ctx = x * (1.0 - band_soft)
-            gx = self.blur(self.gx(ctx))
-            gy = self.blur(self.gy(ctx))
-            mean_x = gx.mean(1, keepdim=True)
-            mean_y = gy.mean(1, keepdim=True)
+            # blur and differentiate
+            bctx = self.blur(ctx)
+            gx = self.gx(bctx)
+            gy = self.gy(bctx)
+
+            # Structure tensor components (aggregated over channels)
+            J11 = (gx * gx).mean(1, keepdim=True)
+            J22 = (gy * gy).mean(1, keepdim=True)
+            J12 = (gx * gy).mean(1, keepdim=True)
+
+            # Smooth structure tensor
+            J11 = F.avg_pool2d(J11, kernel_size=5, stride=1, padding=2)
+            J22 = F.avg_pool2d(J22, kernel_size=5, stride=1, padding=2)
+            J12 = F.avg_pool2d(J12, kernel_size=5, stride=1, padding=2)
 
             eps = 1e-6 if x.dtype == torch.float32 else 1e-4
-            magnitude = (mean_x**2 + mean_y**2).sqrt().clamp_min(eps)
 
+            # orientation angle of dominant eigenvector (normal direction)
+            theta = 0.5 * torch.atan2(2.0 * J12, (J11 - J22) + eps)
             # gradient direction (vx, vy) -> normal to edge
             # (-vy, vx) -> tangent to edge
-            vx, vy = mean_x / magnitude, mean_y / magnitude
-
-            # smooth (to get rid of noise) and renormalize orientation
-            vx = F.avg_pool2d(vx, kernel_size=3, stride=1, padding=1)
-            vy = F.avg_pool2d(vy, kernel_size=3, stride=1, padding=1)
-            den = (vx*vx + vy*vy).sqrt().clamp_min(eps)
-            vx = vx/den
-            vy = vy/den
+            vx = torch.cos(theta)
+            vy = torch.sin(theta)
 
             if self.detach_orientation:
                 vx = vx.detach()
                 vy = vy.detach()
 
-            c_par = torch.sigmoid(4.0 * magnitude) # ~1 at strong edges
-            c_perp = 0.25 * (1.0 - c_par) # ~0 at strong edges
+            # edge strength from largest eigenvalue
+            tmp = torch.sqrt(((J11 - J22) * 0.5)**2 + (J12 * J12) + eps)
+            lam1 = (J11 + J22) * 0.5 + tmp
+            edge = torch.sqrt(lam1 + eps)
+
+            #c_par = torch.sigmoid(4.0 * magnitude) # ~1 at strong edges
+            c_par = torch.sigmoid(self.kappa * edge)  # *8 due to 1/8h and kappa replaces 4.0
+            #c_perp = 0.25 * (1.0 - c_par) # ~0 at strong edges
+            c_perp = self.perp_scale * (1.0 - c_par)  # perp_scale replaces 0.25
 
             # local CFL safety scaling for explicit step!
             # q risk score scales diffusion step down near strong edges
             # but does not for flat areas.
             q = (self.alpha * c_par).abs() + (self.beta * c_perp).abs()
             # 1/3 so apprx 0.33 for a 3x3 stencil, additional safety limit
-            tau_eff = (self.tau * self.scale) * torch.clamp(0.33 / (q + eps), max=1.0)
+            tau_eff = (self.tau * self.scale) * torch.clamp(self.cfl_cap / (q + eps), max=1.0)
 
         x_new = x
         for _ in range(self.steps):
@@ -278,6 +314,6 @@ class DIFBlock(nn.Module):
                 self.alpha * c_par * d2t + self.beta * c_perp * d2n
             )
             step = step * gate # ring gating
-            step = step.clamp(-0.04, 0.04)
+            step = step.clamp(-self.step_clip, self.step_clip)
             x_new = x_new + step
         return x_new
