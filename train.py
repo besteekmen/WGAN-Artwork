@@ -152,8 +152,8 @@ def main():
             set_grads(localD, True)
 
             # Clear out the gradients for tracking
-            optimGD.zero_grad()
-            optimLD.zero_grad()
+            optimGD.zero_grad(set_to_none=True)
+            optimLD.zero_grad(set_to_none=True)
 
             with half_precision():
                 fake, composite = forward_pass(netG, image, mask_hole)
@@ -212,7 +212,7 @@ def main():
             set_grads(localD, False)
 
             # Clear out the gradients for tracking
-            optimG.zero_grad()
+            optimG.zero_grad(set_to_none=True)
 
             with half_precision():
                 # Adversarial loss (negated critic scores)

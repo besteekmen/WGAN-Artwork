@@ -41,12 +41,21 @@ class AOTGenerator(nn.Module):
         self.blur_up1 = AOTfilter(G_HIDDEN * 2, [[1, 2, 1], [2, 4, 2], [1, 2, 1]], norm=16.0)
         self.blur_up2 = AOTfilter(G_HIDDEN, [[1, 2, 1], [2, 4, 2], [1, 2, 1]], norm=16.0)
 
-        self.dif = DIFBlock(G_HIDDEN * 4, detach_orientation=True)
-        self.dif.reset()
+        # Low resolution RGB: bottleneck to rgb
+        self.mid_to_rgb = nn.Sequential(
+            nn.Conv2d(G_HIDDEN * 4, G_HIDDEN, 3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(G_HIDDEN, 3, 3, padding=1),
+            nn.Tanh()
+        )
+        self.rgb_to_mid = nn.Conv2d(3, G_HIDDEN * 4, 3, padding=1)
+        self.ced_param = CEDParamHead(in_ch=4, hidden=32)
+        self.ced1 = CEDStep(iters=1, step_clip=0.08, k_sigma=3, k_rho=11)
+        self.ced2 = CEDStep(iters=2, step_clip=0.08, k_sigma=3, k_rho=13)
 
-        for m in self.modules():
-            if isinstance(m, (DIFBlock)):
-                m.reset()
+        self.mid_to_rgb.apply(weights_init_normal)
+        self.rgb_to_mid.apply(weights_init_normal)
+        self.ced_param.apply(weights_init_normal)
 
     def forward(self, x, mask):
         """Gets an image and a mask to forward. Original image is fed,
@@ -63,8 +72,53 @@ class AOTGenerator(nn.Module):
         x = self.encoder(x)
         x = self.aot1(x)
         #x = self.aot2(x) # epoch time increases! But could be added later.
-        x = self.dif(x, mask)
+
+        # ----------- Diffusion Part -----------
+        #img_pred = self.mid_to_rgb(x) # [B,3,64,64]
+
+        # Option 1: if interpolate rather than pooling
+        #img_ctx = F.interpolate(masked_input, size=img_pred.shape[-2:], mode='bilinear', align_corners=False)
+        #m = F.interpolate(mask, size=img_pred.shape[-2:], mode='nearest').clamp(0,1)
+
+        # Option 2: if pooling rather than interpolate (Faster)
+        #s = masked_input.shape[-1] // img_pred.shape[-1]
+        #img_ctx = F.avg_pool2d(masked_input, kernel_size=s, stride=s)
+        #m = F.max_pool2d(mask, kernel_size=s, stride=s).clamp(min=0, max=1)
+
+        #img_comp = img_ctx * (1 - m) + img_pred * m
+        #tau, alpha, C, gamma = self.ced_param(torch.cat([img_comp, m], dim=1))
+        #img_ced = self.ced(img_comp, img_ctx, m, tau=tau, alpha=alpha, C=C)
+        #delta_feat = self.rgb_to_mid(img_ced - img_pred) # [B,G_HIDDEN * 4,64,64]
+        #x = x + gamma * delta_feat
+        # ----------- End of Diffusion ---------
+
+        # ----------- Diffusion 2 CED ----------
+        # ----------- CED cache (once) ---------
+        Hf, Wf = x.shape[-2], x.shape[-1] # feature grid (64x64)
+        #s = masked_input.shape[-1] // Wf # 256//64 = 4
+
+        img_ctx = F.interpolate(masked_input, size=(Hf,Wf), mode="bilinear", align_corners=False) # [B,3,Hf,Wf]
+        m = F.interpolate(mask, size=(Hf,Wf), mode="nearest").clamp_(0,1) # [B,1,Hf,Wf]
+
+        def ced_inject(feat, ced, gamma_scale=1.0, tau_scale=1.0):
+            img_pred = self.mid_to_rgb(feat)
+            img_comp = img_ctx * (1.0 - m) + img_pred * m
+            tau, alpha, C, gamma = self.ced_param(torch.cat([img_comp, m], dim=1))
+
+            tau = tau * tau_scale
+
+            img_ced = ced(img_comp, img_ctx, m, tau=tau, alpha=alpha, C=C)
+            delta_feat = self.rgb_to_mid(img_ced - img_pred)
+            return feat + (gamma_scale * gamma) * delta_feat
+
+        # ----------- CED pass 1 (after aot1) --
+        x = ced_inject(x, self.ced1, gamma_scale=0.45, tau_scale=0.8)
+
+        # ----------- End of Df 2 CED ----------
+
         x = self.aot3(x)
+        # ----------- CED pass 2 (after aot3) --
+        x = ced_inject(x, self.ced2, gamma_scale=0.2, tau_scale=1.0)
         x = self.aot4(x)
 
         # decoder part
@@ -159,161 +213,151 @@ def AOTfilter(channel, kernel, norm=None):
         p.requires_grad = False
     return nn.Sequential(pad, conv)
 
-class DIFBlock(nn.Module):
-    def __init__(self, dim, steps=1, tau=0.60, alpha=0.9, beta=0.10,
-                 kappa=24.0, perp_scale=0.25, cfl_cap=0.33, step_clip=0.04,
-                 detach_orientation=False):
-        # tau=0.60 rather than 0.15, kappa=32 rather than 4 due to h scaling but 24 is safer
+class CEDParamHead(nn.Module):
+    def __init__(self, in_ch=4, hidden=32):
         super().__init__()
-        self.steps = steps
-        # base parameters
-        self.tau = tau # step size
-        self.alpha = alpha # gain for along-edge (tangent) curvature
-        self.beta = beta # gain for across-edge (normal) curvature
-        self.kappa = kappa
-        self.perp_scale = perp_scale
-        self.cfl_cap = cfl_cap
-        self.step_clip = step_clip
-        self.scale = 1.0
-        self.detach_orientation = detach_orientation
+        self.feat = nn.Sequential(
+            nn.Conv2d(in_ch, hidden, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(hidden, hidden, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True),
+        )
+        self.out = nn.Conv2d(hidden, 4, kernel_size=1) # [B,4,1,1]
 
-        # Gradients and blur for stable orientation
-        self.blur = AOTfilter(dim, [[1, 2, 1], [2, 4, 2], [1, 2, 1]], norm=16.0)
-        self.gx = AOTfilter(dim, [[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]])
-        self.gy = AOTfilter(dim, [[-1, -2, -1], [0, 0, 0], [1, 2, 1]])
+    def forward(self, x):
+        feat = self.feat(x) # [B,hidden,H,W]
+        m = x[:, -1:, :, :] # [B,1,H,W] (1=hole)
 
-        # Second-derivative bases
-        self.dxx = AOTfilter(dim, [[1, -2, 1], [2, -4, 2], [1, -2, 1]])
-        self.dyy = AOTfilter(dim, [[1, 2, 1], [-2, -4, -2], [1, 2, 1]])
-        self.dxy = AOTfilter(dim, [[1, 0, -1], [0, 0, 0], [-1, 0, 1]])
+        w = m # focus on hole pixels
+        wsum = w.sum(dim=(2,3), keepdim=True).clamp_min(1e-6)
+        pooled = (feat * w).sum(dim=(2,3), keepdim=True) / wsum # [B,hidden,1,1]
 
-    @torch.no_grad()
-    def set_schedule(self, scale: float = 1.0):
-        self.scale = float(scale)
+        raw = self.out(pooled).view(x.size(0), 4) # [B,4]
+        raw_tau, raw_alpha, raw_C, raw_gamma = raw[:, 0], raw[:, 1], raw[:, 2], raw[:, 3]
 
-    @torch.no_grad()
-    def reset(self):
-        def _load(seq, k):
-            conv = seq[1]
-            C = conv.in_channels
-            device = conv.weight.device
-            dtype = conv.weight.dtype
-            w = torch.tensor(k, device=device, dtype=dtype).view(1, 1, 3, 3).expand(C, 1, 3, 3)
-            conv.weight.copy_(w)
+        # set safe ranges
+        tau = 0.02 + 0.18 * torch.sigmoid(raw_tau)
+        alpha = 0.001 + 0.049 * torch.sigmoid(raw_alpha)
+        C = 0.10 + 9.90 * torch.sigmoid(raw_C)
+        gamma = 0.05 + 0.45 * torch.sigmoid(raw_gamma)
 
-        # spacing on feature grid (assuming h=1)
-        h = 1.0
-        inv_8h = 1.0 / (8.0 * h)
-        inv_4h2 = 1.0 / (4.0 * h * h)
+        # reshape to broadcast over H, W
+        B = x.size(0)
+        return (tau.view(B,1,1,1),
+                alpha.view(B,1,1,1),
+                C.view(B,1,1,1),
+                gamma.view(B,1,1,1))
 
-        _load(self.blur, [[1/16, 2/16, 1/16], [2/16, 4/16, 2/16], [1/16, 2/16, 1/16]])
+class CEDStep(nn.Module):
+    """
+    Coherence-Enhancing Diffusion (CED) step on RGB (or feature-like) images.
 
-        # scale by 1/8h
-        _load(self.gx, [[-1*inv_8h, 0, 1*inv_8h],
-                        [-2*inv_8h, 0, 2*inv_8h],
-                        [-1*inv_8h, 0, 1*inv_8h]])
-        _load(self.gy, [[-1*inv_8h, -2*inv_8h, -1*inv_8h],
-                        [0, 0, 0],
-                        [1*inv_8h, 2*inv_8h, 1*inv_8h]])
+    - Structure-tensor orientation/coherence is computed from img_comp DETACHED.
+    - tau/alpha/C keep gradient (they affect d_n, d_t and explicit update.)
+    - Tensor math is in float32 even under autocast, then back at the end.
+    """
+    def __init__(self, iters=2, step_clip=0.10, k_sigma=3, k_rho=13):
+        super().__init__()
+        self.iters = int(iters)
+        self.step_clip = float(step_clip)
+        self.k_sigma = int(k_sigma) # pre-smooth before gradient
+        self.k_rho = int(k_rho) # tensor integration scale
 
-        # scale by 1/4h^2
-        _load(self.dxx, [[1*inv_4h2, -2*inv_4h2, 1*inv_4h2],
-                         [2*inv_4h2, -4*inv_4h2, 2*inv_4h2],
-                         [1*inv_4h2, -2*inv_4h2, 1*inv_4h2]])
-        _load(self.dyy, [[1*inv_4h2, 2*inv_4h2, 1*inv_4h2],
-                         [-2*inv_4h2, -4*inv_4h2, -2*inv_4h2],
-                         [1*inv_4h2, 2*inv_4h2, 1*inv_4h2]])
-        _load(self.dxy, [[1*inv_4h2, 0, -1*inv_4h2],
-                         [0, 0, 0],
-                         [-1*inv_4h2, 0, 1*inv_4h2]])
+        # Central difference kernels (h=1 on current grid)
+        kx = torch.tensor([[0,0,0],
+                           [-0.5,0,0.5],
+                           [0,0,0]], dtype=torch.float32).view(1, 1, 3, 3)
+        ky = torch.tensor([[0, -0.5,0],
+                           [0,0,0],
+                           [0,0.5,0]], dtype=torch.float32).view(1, 1, 3, 3)
+        self.register_buffer('kx', kx)
+        self.register_buffer('ky', ky)
 
-    def _down_mask(self, mask, H, W):
-        """Downscale mask to feature dimensions."""
-        return F.interpolate(mask.float(), size=(H, W), mode='nearest').clamp_(0, 1)
+    def _dw(self, x, k):
+        C = x.size(1)
+        w = k.expand(C, 1, 3, 3)
+        return F.conv2d(x, w, padding=1, groups=C)
 
-    def forward(self, x, mask=None):
-        """Anisotropic explicit diffusion step.
-        Implemented similar to CED, but with less controllable params for ease.
-        Performs a single step (could be increased but better not!) diffusion
-        anisotropically, so strong along adges and weak across edges. Gets the
-        bottleneck feature map and full size mask, downscles mask to feature dims,
-        then performs diffusion using the edge orientation from known area,
-        and only to a thin ring to not over diffuse inside mask.
+    def _blur(self, x, k):
+        pad = k // 2
+        return F.avg_pool2d(x, k, 1, pad)
 
-        Arguments:
-            x: [B, G_HIDDEN * 4, H/4, W/4] feature maps
-            mask: [B, 1, H, W] values in [0, 1], (1=hole, 0=known)
+    def forward(self, img_comp, img_ctx, m, tau, alpha, C):
         """
-        B, C, H, W = x.shape
-        band = self._down_mask(mask, H, W) if mask is not None else torch.zeros(B,1,H,W, device=x.device, dtype=x.dtype)
-        band_soft = F.avg_pool2d(band, kernel_size=5, stride=1, padding=2)
-        inner = get_ring(band_soft, size=2, blur_kernel=9, normalize=False)["inner"]
-        gate = (inner * inner).clamp_(0,1) # smooth gate with no hard edges
+        All tensors are [B,*,H,W], params are [B,1,1,1]
+        img_comp, img_ctx: [B,3,H,W] (or any C)
+        m: [B,1,H,W]
+        tau, alpha, C: [B,1,1,1]
+        """
+        eps = 1e-6
+        out_dtype = img_comp.dtype
 
-        with torch.no_grad():
-            ctx = x * (1.0 - band_soft)
-            # blur and differentiate
-            bctx = self.blur(ctx)
-            gx = self.gx(bctx)
-            gy = self.gy(bctx)
+        # Build structure tensor from luminance
+        u0 = img_comp.detach().float()
+        if u0.size(1) == 3:
+            g = 0.299*u0[:,0:1] + 0.587*u0[:,1:2] + 0.114*u0[:,2:3]
+        else:
+            g = u0.mean(dim=1, keepdim=True)
 
-            # Structure tensor components (aggregated over channels)
-            J11 = (gx * gx).mean(1, keepdim=True)
-            J22 = (gy * gy).mean(1, keepdim=True)
-            J12 = (gx * gy).mean(1, keepdim=True)
+        # sigma: smooth before gradient
+        g = self._blur(g, self.k_sigma)
 
-            # Smooth structure tensor
-            J11 = F.avg_pool2d(J11, kernel_size=5, stride=1, padding=2)
-            J22 = F.avg_pool2d(J22, kernel_size=5, stride=1, padding=2)
-            J12 = F.avg_pool2d(J12, kernel_size=5, stride=1, padding=2)
+        gx = F.conv2d(g, self.kx, padding=1)
+        gy = F.conv2d(g, self.ky, padding=1)
 
-            eps = 1e-6 if x.dtype == torch.float32 else 1e-4
+        # rho: integrate tensor over larger neighbourhood, normalize by known pixel support
+        w = (1.0 - m.float()) # known=1, hole=0
+        wr = self._blur(w, self.k_rho).clamp_min(1e-6)
 
-            # orientation angle of dominant eigenvector (normal direction)
-            theta = 0.5 * torch.atan2(2.0 * J12, (J11 - J22) + eps)
-            # gradient direction (vx, vy) -> normal to edge
-            # (-vy, vx) -> tangent to edge
-            vx = torch.cos(theta)
-            vy = torch.sin(theta)
+        J11 = self._blur((gx * gx) * w, self.k_rho) / wr
+        J22 = self._blur((gy * gy) * w, self.k_rho) / wr
+        J12 = self._blur((gx * gy) * w, self.k_rho) / wr
 
-            if self.detach_orientation:
-                vx = vx.detach()
-                vy = vy.detach()
+        # Dominant eigenvector angle (normal direction)
+        theta = 0.5 * torch.atan2(2.0 * J12, (J11 - J22) + eps)
 
-            # edge strength from largest eigenvalue
-            tmp = torch.sqrt(((J11 - J22) * 0.5)**2 + (J12 * J12) + eps)
-            lam1 = (J11 + J22) * 0.5 + tmp
-            edge = torch.sqrt(lam1 + eps)
+        # Coherence measure from eigenvalues
+        tr = J11 + J22
+        det = torch.sqrt((J11 - J22)**2 + 4.0 * (J12**2) + eps)
+        mu1 = 0.5 * (tr + det)
+        mu2 = 0.5 * (tr - det)
+        coh = (mu1 - mu2)**2 # coherence measure (detached wrt img_comp)
 
-            #c_par = torch.sigmoid(4.0 * magnitude) # ~1 at strong edges
-            c_par = torch.sigmoid(self.kappa * edge)  # *8 due to 1/8h and kappa replaces 4.0
-            #c_perp = 0.25 * (1.0 - c_par) # ~0 at strong edges
-            c_perp = self.perp_scale * (1.0 - c_par)  # perp_scale replaces 0.25
+        # diffusion coefficients (KEEP grad wrt alpha, C)
+        alpha_f = alpha.float()
+        C_f = C.float()
+        tau_f = tau.float()
+        # across-edge (normal) = alpha (small)
+        d_n = alpha_f
+        # along-edge (tangent) grows toward 1 when coherence is high
+        d_t = alpha_f + (1.0 - alpha_f) * torch.exp(-C_f / (coh + eps))
 
-            # local CFL safety scaling for explicit step!
-            # q risk score scales diffusion step down near strong edges
-            # but does not for flat areas.
-            q = (self.alpha * c_par).abs() + (self.beta * c_perp).abs()
-            # 1/3 so apprx 0.33 for a 3x3 stencil, additional safety limit
-            tau_eff = (self.tau * self.scale) * torch.clamp(self.cfl_cap / (q + eps), max=1.0)
+        c = torch.cos(theta)
+        s = torch.sin(theta)
+        # v_n = (c,s) and v_t = (-s,c)
+        vnx, vny = c, s
+        vtx, vty = -s, c
 
-        x_new = x
-        for _ in range(self.steps):
-            dxx = self.dxx(x_new)
-            dyy = self.dyy(x_new)
-            dxy = self.dxy(x_new)
+        D11 = d_n * (vnx*vnx) + d_t * (vtx*vtx)
+        D22 = d_n * (vny*vny) + d_t * (vty*vty)
+        D12 = d_n * (vnx*vny) + d_t * (vtx*vty)
 
-            vxvx = vx * vx
-            vyvy = vy * vy
-            vxvy = vx * vy
+        # Explicit update in float32, mask-only, then enforce context
+        u = img_comp.float()
+        ctx = img_ctx.float()
+        m_soft = m.float()
+        m_hard = (m_soft > 0.5).float()
 
-            # hessian calculations to get curvature
-            d2n = vxvx * dxx + 2 * vxvy * dxy + vyvy * dyy # curvature along normal
-            d2t = vyvy * dxx - 2 * vxvy * dxy + vxvx * dyy # curvature along tangent
-            step = tau_eff * (
-                self.alpha * c_par * d2t + self.beta * c_perp * d2n
-            )
-            step = step * gate # ring gating
-            step = step.clamp(-self.step_clip, self.step_clip)
-            x_new = x_new + step
-        return x_new
+        for _ in range(self.iters):
+            ux = self._dw(u, self.kx)
+            uy = self._dw(u, self.ky)
+
+            px = D11 * ux + D12 * uy
+            py = D12 * ux + D22 * uy
+
+            div = self._dw(px, self.kx) + self._dw(py, self.ky)
+
+            step = (tau_f * div).clamp(-self.step_clip, self.step_clip)
+            u = u + step * m_soft
+            u = u * m_hard + ctx * (1.0 - m_hard)
+        return u.to(out_dtype)
