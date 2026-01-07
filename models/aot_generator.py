@@ -50,8 +50,8 @@ class AOTGenerator(nn.Module):
         )
         self.rgb_to_mid = nn.Conv2d(3, G_HIDDEN * 4, 3, padding=1)
         self.ced_param = CEDParamHead(in_ch=4, hidden=32)
-        self.ced1 = CEDStep(iters=1, step_clip=0.08, k_sigma=3, k_rho=11)
-        self.ced2 = CEDStep(iters=2, step_clip=0.08, k_sigma=3, k_rho=13)
+        self.ced1 = CEDStep(iters=1, k_sigma=3, k_rho=11)
+        self.ced2 = CEDStep(iters=2, k_sigma=3, k_rho=13)
 
         self.mid_to_rgb.apply(weights_init_normal)
         self.rgb_to_mid.apply(weights_init_normal)
@@ -73,41 +73,19 @@ class AOTGenerator(nn.Module):
         x = self.aot1(x)
         #x = self.aot2(x) # epoch time increases! But could be added later.
 
-        # ----------- Diffusion Part -----------
-        #img_pred = self.mid_to_rgb(x) # [B,3,64,64]
-
-        # Option 1: if interpolate rather than pooling
-        #img_ctx = F.interpolate(masked_input, size=img_pred.shape[-2:], mode='bilinear', align_corners=False)
-        #m = F.interpolate(mask, size=img_pred.shape[-2:], mode='nearest').clamp(0,1)
-
-        # Option 2: if pooling rather than interpolate (Faster)
-        #s = masked_input.shape[-1] // img_pred.shape[-1]
-        #img_ctx = F.avg_pool2d(masked_input, kernel_size=s, stride=s)
-        #m = F.max_pool2d(mask, kernel_size=s, stride=s).clamp(min=0, max=1)
-
-        #img_comp = img_ctx * (1 - m) + img_pred * m
-        #tau, alpha, C, gamma = self.ced_param(torch.cat([img_comp, m], dim=1))
-        #img_ced = self.ced(img_comp, img_ctx, m, tau=tau, alpha=alpha, C=C)
-        #delta_feat = self.rgb_to_mid(img_ced - img_pred) # [B,G_HIDDEN * 4,64,64]
-        #x = x + gamma * delta_feat
-        # ----------- End of Diffusion ---------
-
-        # ----------- Diffusion 2 CED ----------
-        # ----------- CED cache (once) ---------
         Hf, Wf = x.shape[-2], x.shape[-1] # feature grid (64x64)
-        #s = masked_input.shape[-1] // Wf # 256//64 = 4
 
-        img_ctx = F.interpolate(masked_input, size=(Hf,Wf), mode="bilinear", align_corners=False) # [B,3,Hf,Wf]
+        img_ctx = F.interpolate(masked_input, size=(Hf,Wf), mode="area") # [B,3,Hf,Wf]
         m = F.interpolate(mask, size=(Hf,Wf), mode="nearest").clamp_(0,1) # [B,1,Hf,Wf]
 
         def ced_inject(feat, ced, gamma_scale=1.0, tau_scale=1.0):
             img_pred = self.mid_to_rgb(feat)
             img_comp = img_ctx * (1.0 - m) + img_pred * m
-            tau, alpha, C, gamma = self.ced_param(torch.cat([img_comp, m], dim=1))
+            tau, alpha, C, gamma, disc_alpha = self.ced_param(torch.cat([img_comp, m], dim=1))
 
             tau = tau * tau_scale
 
-            img_ced = ced(img_comp, img_ctx, m, tau=tau, alpha=alpha, C=C)
+            img_ced = ced(img_comp, img_ctx, m, tau=tau, alpha=alpha, C=C, disc_alpha=disc_alpha)
             delta_feat = self.rgb_to_mid(img_ced - img_pred)
             return feat + (gamma_scale * gamma) * delta_feat
 
@@ -222,7 +200,7 @@ class CEDParamHead(nn.Module):
             nn.Conv2d(hidden, hidden, kernel_size=3, padding=1),
             nn.ReLU(inplace=True),
         )
-        self.out = nn.Conv2d(hidden, 4, kernel_size=1) # [B,4,1,1]
+        self.out = nn.Conv2d(hidden, 5, kernel_size=1) # [B,5,1,1] with disc_alpha
 
     def forward(self, x):
         feat = self.feat(x) # [B,hidden,H,W]
@@ -232,36 +210,41 @@ class CEDParamHead(nn.Module):
         wsum = w.sum(dim=(2,3), keepdim=True).clamp_min(1e-6)
         pooled = (feat * w).sum(dim=(2,3), keepdim=True) / wsum # [B,hidden,1,1]
 
-        raw = self.out(pooled).view(x.size(0), 4) # [B,4]
-        raw_tau, raw_alpha, raw_C, raw_gamma = raw[:, 0], raw[:, 1], raw[:, 2], raw[:, 3]
+        raw = self.out(pooled).view(x.size(0), 5) # [B,5]
+        raw_tau, raw_alpha, raw_C, raw_gamma, raw_disc = raw[:, 0], raw[:, 1], raw[:, 2], raw[:, 3], raw[:, 4]
 
-        # set safe ranges
-        tau = 0.02 + 0.18 * torch.sigmoid(raw_tau)
-        alpha = 0.001 + 0.049 * torch.sigmoid(raw_alpha)
-        C = 0.10 + 9.90 * torch.sigmoid(raw_C)
-        gamma = 0.05 + 0.45 * torch.sigmoid(raw_gamma)
+        # set safe ranges (tau <= ~0.25)
+        tau = 0.01 + 0.24 * torch.sigmoid(raw_tau) # [0.01, 0.25)
+        alpha = 1e-4 + 0.05 * torch.sigmoid(raw_alpha) # minimal diffusivity (lambda1)
+        C = 0.10 + 9.90 * torch.sigmoid(raw_C) # coherence parameter
+        gamma = 0.05 + 0.45 * torch.sigmoid(raw_gamma) # injection strength
 
+        # stencil parameter alpha_disc in [0, 0.5]
+        disc_alpha = 0.50 * torch.sigmoid(raw_disc)
         # reshape to broadcast over H, W
         B = x.size(0)
         return (tau.view(B,1,1,1),
                 alpha.view(B,1,1,1),
                 C.view(B,1,1,1),
-                gamma.view(B,1,1,1))
+                gamma.view(B,1,1,1),
+                disc_alpha.view(B,1,1,1))
 
 class CEDStep(nn.Module):
     """
     Coherence-Enhancing Diffusion (CED) step on RGB (or feature-like) images.
+    Uses Weickert-style 9 point stencil
 
-    - Structure-tensor orientation/coherence is computed from img_comp DETACHED.
-    - tau/alpha/C keep gradient (they affect d_n, d_t and explicit update.)
-    - Tensor math is in float32 even under autocast, then back at the end.
+    - Diffusion tensor (Dxx, Dxy, Dyy) is built from the strcture tensor of img_comp DETACHED.
+    - Update uses a 9 point nonnegative discretization controlled by disc_alpha.
+    - tau/alpha/C/disc_alpha are learnable, stencils are fixed.
+    - Applied only in the hole region
     """
-    def __init__(self, iters=2, step_clip=0.10, k_sigma=3, k_rho=13):
+    def __init__(self, iters=2, k_sigma=3, k_rho=13):
         super().__init__()
         self.iters = int(iters)
-        self.step_clip = float(step_clip)
         self.k_sigma = int(k_sigma) # pre-smooth before gradient
         self.k_rho = int(k_rho) # tensor integration scale
+        self.pad = nn.ReflectionPad2d(1)
 
         # Central difference kernels (h=1 on current grid)
         kx = torch.tensor([[0,0,0],
@@ -273,45 +256,100 @@ class CEDStep(nn.Module):
         self.register_buffer('kx', kx)
         self.register_buffer('ky', ky)
 
-    def _dw(self, x, k):
-        C = x.size(1)
-        w = k.expand(C, 1, 3, 3)
-        return F.conv2d(x, w, padding=1, groups=C)
-
-    def _blur(self, x, k):
+    def _blur_box(self, x, k):
+        # fast gaussian approximation; k should be odd
         pad = k // 2
         return F.avg_pool2d(x, k, 1, pad)
 
-    def forward(self, img_comp, img_ctx, m, tau, alpha, C):
+    def _luminance(self, u):
+        # u: [B,C,H,W] float32
+        if u.size(1) == 3:
+            return 0.299*u[:,0:1] + 0.587*u[:,1:2] + 0.114*u[:,2:3]
+        return u.mean(dim=1, keepdim=True)
+
+    def _update(self, u, a, b, c, disc_alpha):
+        """
+        u: [B,C,H,W]
+        a, b, c: [B,1,H,W] for D = [[a,b],[b,c]]
+        disc_alpha: [B,1,1,1] in [0,0.5]
+        """
+        uT = u.permute(0, 1, 3, 2) # [B,C,W,H]
+        aT = a.permute(0, 1, 3, 2)
+        bT = b.permute(0, 1, 3, 2)
+        cT = c.permute(0, 1, 3, 2)
+
+        up = self.pad(uT)
+        ap = self.pad(aT)
+        bp = self.pad(bT)
+        cp = self.pad(cT)
+
+        # beta derived from sign(bp) with constraint |beta| <= 1 - 2*alpha_disc
+        alpha = disc_alpha.clamp(0.0, 0.5)
+        beta = (1.0 - 2.0 * alpha) * torch.sign(bp)
+        delta = alpha * (ap + cp) + beta * bp
+
+        Wp, Hp = up.shape[-2], up.shape[-1]
+        H = Hp - 1
+        W = Wp - 1
+
+        # weights for 9 neighbors (vectorized)
+        wpo = 0.5 * (ap[:, :, 1:W, 1:H] - delta[:, :, 1:W, 1:H] +
+                    ap[:, :, 1:W, 0:H-1] - delta[:, :, 1:W, 0:H-1])
+        wmo = 0.5 * (ap[:, :, 0:W-1, 1:H] - delta[:, :, 0:W-1, 1:H] +
+                    ap[:, :, 0:W-1, 0:H-1] - delta[:, :, 0:W-1, 0:H-1])
+        wop = 0.5 * (cp[:, :, 1:W, 1:H] - delta[:, :, 1:W, 1:H] +
+                    cp[:, :, 0:W-1, 1:H] - delta[:, :, 0:W-1, 1:H])
+        wom = 0.5 * (cp[:, :, 1:W, 0:H-1] - delta[:, :, 1:W, 0:H-1] +
+                    cp[:, :, 0:W-1, 0:H-1] - delta[:, :, 0:W-1, 0:H-1])
+
+        wpp = 0.5 * (bp[:, :, 1:W, 1:H] + delta[:, :, 1:W, 1:H])
+        wmm = 0.5 * (bp[:, :, 0:W-1, 0:H-1] + delta[:, :, 0:W-1, 0:H-1])
+        wmp = 0.5 * (delta[:, :, 0:W-1, 1:H] - bp[:, :, 0:W-1, 1:H])
+        wpm = 0.5 * (delta[:, :, 1:W, 0:H-1] - bp[:, :, 1:W, 0:H-1])
+
+        woo = -(wpo + wmo + wop + wom + wpp + wmm + wmp + wpm)
+
+        # apply stencil to u (note: all slices end up [B,C,H,W])
+        Au = (
+            woo * up[:, :, 1:W, 1:H] +
+            wpo * up[:, :, 2:, 1:H] +
+            wmo * up[:, :, 0:W-1, 1:H] +
+            wop * up[:, :, 1:W, 2:] +
+            wom * up[:, :, 1:W, 0:H-1] +
+            wpp * up[:, :, 2:, 2:] +
+            wmm * up[:, :, 0:W-1, 0:H-1] +
+            wpm * up[:, :, 2:, 0:H-1] +
+            wmp * up[:, :, 0:W-1, 2:]
+        )
+
+        return Au.permute(0, 1, 3, 2)
+
+    def forward(self, img_comp, img_ctx, m, tau, alpha, C, disc_alpha):
         """
         All tensors are [B,*,H,W], params are [B,1,1,1]
         img_comp, img_ctx: [B,3,H,W] (or any C)
         m: [B,1,H,W]
-        tau, alpha, C: [B,1,1,1]
+        tau, alpha, C, disc_alpha: [B,1,1,1]
         """
         eps = 1e-6
         out_dtype = img_comp.dtype
 
-        # Build structure tensor from luminance
+        # Build structure tensor from detached image
         u0 = img_comp.detach().float()
-        if u0.size(1) == 3:
-            g = 0.299*u0[:,0:1] + 0.587*u0[:,1:2] + 0.114*u0[:,2:3]
-        else:
-            g = u0.mean(dim=1, keepdim=True)
+        g = self._luminance(u0)
 
-        # sigma: smooth before gradient
-        g = self._blur(g, self.k_sigma)
-
+        # pre-smoothing
+        g = self._blur_box(g, self.k_sigma)
         gx = F.conv2d(g, self.kx, padding=1)
         gy = F.conv2d(g, self.ky, padding=1)
 
         # rho: integrate tensor over larger neighbourhood, normalize by known pixel support
-        w = (1.0 - m.float()) # known=1, hole=0
-        wr = self._blur(w, self.k_rho).clamp_min(1e-6)
+        w_known = (1.0 - m.float()) # known=1, hole=0
+        wr = self._blur_box(w_known, self.k_rho).clamp_min(1e-6)
 
-        J11 = self._blur((gx * gx) * w, self.k_rho) / wr
-        J22 = self._blur((gy * gy) * w, self.k_rho) / wr
-        J12 = self._blur((gx * gy) * w, self.k_rho) / wr
+        J11 = self._blur_box((gx * gx) * w_known, self.k_rho) / wr
+        J22 = self._blur_box((gy * gy) * w_known, self.k_rho) / wr
+        J12 = self._blur_box((gx * gy) * w_known, self.k_rho) / wr
 
         # Dominant eigenvector angle (normal direction)
         theta = 0.5 * torch.atan2(2.0 * J12, (J11 - J22) + eps)
@@ -323,14 +361,12 @@ class CEDStep(nn.Module):
         mu2 = 0.5 * (tr - det)
         coh = (mu1 - mu2)**2 # coherence measure (detached wrt img_comp)
 
-        # diffusion coefficients (KEEP grad wrt alpha, C)
+        # Weickert CED eigenvalues
         alpha_f = alpha.float()
         C_f = C.float()
-        tau_f = tau.float()
-        # across-edge (normal) = alpha (small)
-        d_n = alpha_f
-        # along-edge (tangent) grows toward 1 when coherence is high
-        d_t = alpha_f + (1.0 - alpha_f) * torch.exp(-C_f / (coh + eps))
+
+        lam1 = alpha_f
+        lam2 = alpha_f + (1.0 - alpha_f) * torch.exp(-C_f / (coh + eps))
 
         c = torch.cos(theta)
         s = torch.sin(theta)
@@ -338,26 +374,25 @@ class CEDStep(nn.Module):
         vnx, vny = c, s
         vtx, vty = -s, c
 
-        D11 = d_n * (vnx*vnx) + d_t * (vtx*vtx)
-        D22 = d_n * (vny*vny) + d_t * (vty*vty)
-        D12 = d_n * (vnx*vny) + d_t * (vtx*vty)
+        dxx = lam1 * (vnx*vnx) + lam2 * (vtx*vtx)
+        dyy = lam1 * (vny*vny) + lam2 * (vty*vty)
+        dxy = lam1 * (vnx*vny) + lam2 * (vtx*vty)
 
-        # Explicit update in float32, mask-only, then enforce context
+        # Explicit iterarions, only update hole!
         u = img_comp.float()
         ctx = img_ctx.float()
         m_soft = m.float()
         m_hard = (m_soft > 0.5).float()
+        tau_f = tau.float()
 
         for _ in range(self.iters):
-            ux = self._dw(u, self.kx)
-            uy = self._dw(u, self.ky)
+            u_old = u
+            Au = self._update(u_old, dxx, dxy, dyy, disc_alpha.float())
+            u_new = u_old + tau_f * Au
 
-            px = D11 * ux + D12 * uy
-            py = D12 * ux + D22 * uy
+            # update only in the hole
+            u = u_old + (u_new - u_old) * m_soft
 
-            div = self._dw(px, self.kx) + self._dw(py, self.ky)
-
-            step = (tau_f * div).clamp(-self.step_clip, self.step_clip)
-            u = u + step * m_soft
+            # enforce known region from context
             u = u * m_hard + ctx * (1.0 - m_hard)
         return u.to(out_dtype)
